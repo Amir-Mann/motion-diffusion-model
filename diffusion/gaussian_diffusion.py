@@ -16,6 +16,9 @@ from copy import deepcopy
 from diffusion.nn import mean_flat, sum_flat
 from diffusion.losses import normal_kl, discretized_gaussian_log_likelihood
 from data_loaders.humanml.scripts import motion_process
+from utils.math_utils import perspective_projection_batch, sample_random_camera
+from data_loaders.humanml.scripts.motion_process import recover_from_ric
+
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps, scale_betas=1.):
     """
@@ -95,6 +98,7 @@ class LossType(enum.Enum):
     )  # use raw MSE loss (with RESCALED_KL when learning variances)
     KL = enum.auto()  # use the variational lower-bound
     RESCALED_KL = enum.auto()  # like KL, but rescale to estimate the full VLB
+    CAMERA_MSE = enum.auto()
 
     def is_vb(self):
         return self == LossType.KL or self == LossType.RESCALED_KL
@@ -197,6 +201,9 @@ class GaussianDiffusion:
         )
 
         self.l2_loss = lambda a, b: (a - b) ** 2  # th.nn.MSELoss(reduction='none')  # must be None for handling mask later on.
+        self.dataset_params_not_initialized = True
+        self.dataset_torch_std = None
+        self.dataset_torch_mean = None
 
     def masked_l2(self, a, b, mask):
         # assuming a.shape == b.shape == bs, J, Jdim, seqlen
@@ -1270,7 +1277,7 @@ class GaussianDiffusion:
             )["output"]
             if self.loss_type == LossType.RESCALED_KL:
                 terms["loss"] *= self.num_timesteps
-        elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
+        elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE or self.loss_type == LossType.CAMERA_MSE:
             model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
 
             if self.model_var_type in [
@@ -1303,6 +1310,62 @@ class GaussianDiffusion:
                 ModelMeanType.EPSILON: noise,
             }[self.model_mean_type]
             assert model_output.shape == target.shape == x_start.shape  # [bs, njoints, nfeats, nframes]
+
+            #AMIR MARKER
+            if self.loss_type == LossType.CAMERA_MSE:
+                if self.dataset_params_not_initialized:
+                    self.dataset_params_not_initialized = False
+                    self.dataset_torch_std = torch.tensor(dataset.t2m_dataset.std).to(model_output.device)
+                    self.dataset_torch_mean = torch.tensor(dataset.t2m_dataset.mean).to(model_output.device)
+                
+                def get_xyz_hunanml(sample):
+                    # Recover XYZ *positions* from HumanML3D vector representation
+                    n_joints = 22 if sample.shape[1] == 263 else 21
+                    sample = sample.permute(0, 2, 3, 1) * self.dataset_torch_std + self.dataset_torch_mean
+                    sample = recover_from_ric(sample, n_joints)
+                    return sample.view(-1, *sample.shape[2:]).permute(0, 2, 3, 1)
+                target_xyz = get_xyz_hunanml(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
+                model_output_xyz = get_xyz_hunanml(model_output)  # [bs, nvertices, 3, nframes]
+                
+                cam_hor_angles, cam_ver_angles, cam_distance, cam_shift = sample_random_camera(target_xyz, distance_factor=2)
+                target_xy, _ = perspective_projection_batch(target_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
+                model_output_xy, distances = perspective_projection_batch(model_output_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
+                loss = self.masked_l2(target_xy * distances, model_output_xy * distances, mask)
+                loss_max_value = 10
+                filtered_loss = torch.where(loss < loss_max_value, loss, torch.zeros_like(loss))
+                terms["loss"] = filtered_loss
+
+                debugging = False
+                if (loss > loss_max_value).any() and debugging:  # Check if any value in terms["loss"] is greater than 10
+                    print("Got a large loss...")
+                    def truncate(tensor, factor=8):
+                        # Truncate all dimensions to a maximum size of factor. Useful for easy to read prints.
+                        slices = tuple(slice(0, min(factor, dim)) for dim in tensor.shape)
+                        return tensor[slices], [dim > factor for dim in tensor.shape]
+                    import pickle as p
+                    with open("/home/amir.mann/temp/a.pkl", "wb") as f:
+                        p.dump({
+                            "loss_explode": (loss > 2).cpu(),
+                            "target_xyz": target_xyz.cpu(),
+                            "model_output_xyz": model_output_xyz.cpu(),
+                            "cam_hor_angles": cam_hor_angles.cpu(),
+                            "cam_ver_angles": cam_ver_angles.cpu(),
+                            "cam_distance": cam_distance.cpu(),
+                            "cam_shift": cam_shift.cpu(),
+                            "target_xy": target_xy.cpu(),
+                            "model_output_xy": model_output_xy.cpu(),
+                            "mask": mask.cpu(),
+                            "distances": distances.cpu(),
+                            "target_distances": _.cpu(),
+                            "terms": terms["loss"].cpu(),
+                            "pure_loss": loss.cpu(),
+                            "rot_mse": self.masked_l2(target, model_output, mask).cpu(),
+                            "xyz_loss": self.masked_l2(target_xyz, model_output_xyz, mask).cpu(),
+                            "t": t.cpu(),
+                        }, f)
+                    exit()
+
+                return terms
 
             terms["rot_mse"] = self.masked_l2(target, model_output, mask) # mean_flat(rot_mse)
 

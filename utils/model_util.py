@@ -59,7 +59,10 @@ def create_gaussian_diffusion(args):
     rescale_timesteps = False
 
     betas = gd.get_named_beta_schedule(args.noise_schedule, steps, scale_beta)
-    loss_type = gd.LossType.MSE
+    if not args.sample_2d:
+        loss_type = gd.LossType.MSE
+    else:
+        loss_type = gd.LossType.CAMERA_MSE
 
     if not timestep_respacing:
         timestep_respacing = [steps]

@@ -2,6 +2,7 @@ from torch.utils.data import DataLoader
 from data_loaders.tensors import collate as all_collate
 from data_loaders.tensors import t2m_collate
 
+
 def get_dataset_class(name):
     if name == "amass":
         from .amass import AMASS
@@ -41,12 +42,20 @@ def get_dataset(name, num_frames, split='train', hml_mode='train'):
 
 
 def get_dataset_loader(name, batch_size, num_frames, split='train', hml_mode='train'):
-    dataset = get_dataset(name, num_frames, split, hml_mode)
+    if "," in split:
+        datasets = [get_dataset(name, num_frames, split=subsplit, hml_mode=hml_mode) for subsplit in split.split(",")]
+    else:
+        datasets = [get_dataset(name, num_frames, split, hml_mode)]
     collate = get_collate_fn(name, hml_mode)
 
-    loader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=True,
-        num_workers=8, drop_last=True, collate_fn=collate
-    )
+    loaders = [
+        DataLoader(
+            dataset, batch_size=batch_size, shuffle=True,
+            num_workers=8, drop_last=True, collate_fn=collate
+        ) for dataset in datasets
+    ]
 
-    return loader
+    if "," in split:
+        return loaders
+    else:
+        return loaders[0]

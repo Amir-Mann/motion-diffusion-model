@@ -17,6 +17,9 @@ def parse_and_load_from_model(parser):
 
     # load args from model
     model_path = get_model_path_from_args()
+    import sys
+    if "playing_around" in sys.argv[0]:
+        return args
     args_path = os.path.join(os.path.dirname(model_path), 'args.json')
     assert os.path.exists(args_path), 'Arguments json file was not found!'
     with open(args_path, 'r') as fr:
@@ -70,6 +73,8 @@ def add_diffusion_options(parser):
     group.add_argument("--diffusion_steps", default=1000, type=int,
                        help="Number of diffusion steps (denoted T in the paper)")
     group.add_argument("--sigma_small", default=True, type=bool, help="Use smaller sigma values.")
+    group.add_argument("--sample_2d", action='store_true',
+                       help="Train based on 2d projection of the data instead of the original formulation.")
 
 
 def add_model_options(parser):
@@ -115,6 +120,8 @@ def add_training_options(parser):
     group.add_argument("--lr", default=1e-4, type=float, help="Learning rate.")
     group.add_argument("--weight_decay", default=0.0, type=float, help="Optimizer weight decay.")
     group.add_argument("--lr_anneal_steps", default=0, type=int, help="Number of learning rate anneal steps.")
+    group.add_argument("--train_split", default='train', type=str,
+                       help="Which split to train on.")
     group.add_argument("--eval_batch_size", default=32, type=int,
                        help="Batch size during evaluation loop. Do not change this unless you know what you are doing. "
                             "T2m precision calculation is based on fixed batch size 32.")

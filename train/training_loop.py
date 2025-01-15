@@ -12,12 +12,13 @@ from diffusion import logger
 from utils import dist_util
 from diffusion.fp16_util import MixedPrecisionTrainer
 from diffusion.resample import LossAwareSampler, UniformSampler
+from diffusion.gaussian_diffusion import LossType
 from tqdm import tqdm
 from diffusion.resample import create_named_schedule_sampler
 from data_loaders.humanml.networks.evaluator_wrapper import EvaluatorMDMWrapper
 from eval import eval_humanml, eval_humanact12_uestc
 from data_loaders.get_data import get_dataset_loader
-from utils.misc import load_model_wo_clip
+from utils.misc import load_model_wo_clip, AlternatingIterable
 
 
 # For ImageNet experiments, this was a good default value.
@@ -27,7 +28,7 @@ INITIAL_LOG_LOSS_SCALE = 20.0
 
 
 class TrainLoop:
-    def __init__(self, args, train_platform, model, diffusion, data):
+    def __init__(self, args, train_platform, model, diffusion, data, other_data=None):
         self.args = args
         self.dataset = args.dataset
         self.train_platform = train_platform
@@ -35,6 +36,7 @@ class TrainLoop:
         self.diffusion = diffusion
         self.cond_mode = model.cond_mode
         self.data = data
+        self.other_data = other_data
         self.batch_size = args.batch_size
         self.microbatch = args.batch_size  # deprecating this option
         self.lr = args.lr
@@ -54,6 +56,8 @@ class TrainLoop:
         self.num_epochs = self.num_steps // len(self.data) + 1
 
         self.sync_cuda = torch.cuda.is_available()
+
+        logger.configure(dir=args.save_dir)
 
         self._load_and_sync_parameters()
         self.mp_trainer = MixedPrecisionTrainer(
@@ -134,14 +138,19 @@ class TrainLoop:
     def run_loop(self):
 
         for epoch in range(self.num_epochs):
-            print(f'Starting epoch {epoch} / {self.num_epochs}')
-            for motion, cond in tqdm(self.data):
+            print(f'\nStarting epoch {epoch} / {self.num_epochs}')
+            if self.other_data is None:
+                generator = self.data
+            else:
+                generator = AlternatingIterable(self.data, self.other_data)
+            for motion, cond in tqdm(generator):
                 if not (not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps):
                     break
 
                 motion = motion.to(self.device)
                 cond['y'] = {key: val.to(self.device) if torch.is_tensor(val) else val for key, val in cond['y'].items()}
-
+                if self.other_data is not None:
+                    self.diffusion.loss_type = LossType.CAMERA_MSE if self.step % 2 == 0 else LossType.MSE
                 self.run_step(motion, cond)
                 if self.step % self.log_interval == 0:
                     for k,v in logger.get_current().dumpkvs().items():
@@ -279,9 +288,10 @@ class TrainLoop:
             for e in clip_weights:
                 del state_dict[e]
 
-            logger.log(f"saving model...")
             filename = self.ckpt_file_name()
-            with open(os.path.join(self.save_dir, filename), "wb") as f:
+            save_path = os.path.join(self.save_dir, filename)
+            logger.log(f"saving model to {save_path}...")
+            with open(save_path, "wb") as f:
                 torch.save(state_dict, f)
 
         save_checkpoint(self.mp_trainer.master_params)

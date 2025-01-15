@@ -33,7 +33,10 @@ def main():
     dist_util.setup_dist(args.device)
 
     print("creating data loader...")
-    data = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=args.num_frames)
+    data = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=args.num_frames, split=args.train_split)
+    other_data = None
+    if isinstance(data, list):
+        data, other_data= data[0], data[1]
 
     print("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(args, data)
@@ -42,7 +45,7 @@ def main():
 
     print('Total params: %.2fM' % (sum(p.numel() for p in model.parameters_wo_clip()) / 1000000.0))
     print("Training...")
-    TrainLoop(args, train_platform, model, diffusion, data).run_loop()
+    TrainLoop(args, train_platform, model, diffusion, data, other_data).run_loop()
     train_platform.close()
 
 if __name__ == "__main__":

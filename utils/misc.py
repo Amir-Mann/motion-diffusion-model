@@ -38,3 +38,43 @@ def freeze_joints(x, joints_to_freeze):
     frozen = x.detach().clone()
     frozen[:, joints_to_freeze, :, :] = frozen[:, joints_to_freeze, :, :1]
     return frozen
+
+
+class AlternatingIterable:
+    def __init__(self, iterable1, iterable2):
+        """
+        Initialize the generator with two subgenerators.
+        Args:
+            iterable1 (iterable): The first generator (iteration stops when this is exhausted).
+            iterable2 (iterable): The second generator (can continue cycling if needed).
+        """
+        self.iterable1 = iter(iterable1)
+        self.iterable2 = iter(iterable2)
+        self.switch = True  # To alternate between iterable1 and iterable
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        """
+        Yield an item alternately from iterable1 and iterable.
+        Stops iteration when iterable1 is exhausted.
+        """
+        if self.switch:  # Alternate between iterable1 and iterable
+            try:
+                item = next(self.iterable1)
+            except StopIteration:
+                raise StopIteration  # Stop when iterable1 is exhausted
+        else:
+            try:
+                item = next(self.iterable2)
+            except StopIteration:
+                # Restart iterable2 when exhausted
+                self.iterable2 = iter(self.iterable2)
+                item = next(self.iterable2)
+
+        self.switch = not self.switch  # Toggle the switch
+        return item
+
+    def __len__(self):
+        return 2 * len(self.iterable1)
