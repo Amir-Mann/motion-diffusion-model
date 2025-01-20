@@ -4,7 +4,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation, FFMpegFileWriter
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
 import mpl_toolkits.mplot3d.axes3d as p3
 # import cv2
 from textwrap import wrap
@@ -23,23 +23,54 @@ def list_cut_average(ll, intervals):
         ll_new.append(np.mean(ll[l_low:l_high]))
     return ll_new
 
+def plot_3d_motion(
+    save_path, 
+    kinematic_tree, 
+    joints, 
+    title, 
+    dataset, 
+    figsize=(3, 3), 
+    fps=120, 
+    radius=3,
+    vis_mode='default', 
+    gt_frames=[],
+    other_joints=None
+):
+    """
+    Plots a 3D motion animation and saves it as a GIF.
 
-def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset, figsize=(3, 3), fps=120, radius=3,
-                   vis_mode='default', gt_frames=[]):
+    Parameters:
+    - save_path (str): Path to save the resulting GIF.
+    - kinematic_tree (list): Structure defining joint connections.
+    - joints (numpy.ndarray): Joint positions (seq_len, joints_num, 3).
+    - title (str): Title for the plot.
+    - dataset (str): Dataset identifier to adjust visualization scale.
+    - figsize (tuple): Figure size in inches (width, height).
+    - fps (int): Frames per second for the animation.
+    - radius (float): Spatial radius for the plot bounds.
+    - vis_mode (str): Visualization mode (e.g., 'default', 'gt', 'upper_body').
+    - gt_frames (list): Indices of ground-truth frames.
+
+    Returns:
+    - None
+    """
+    # Switch the backend to avoid GUI rendering issues.
+    print("Other joints?", other_joints is not None)
     matplotlib.use('Agg')
 
+    # Wrap long titles for better display.
     title = '\n'.join(wrap(title, 20))
 
     def init():
+        """Initialize the 3D plot axes."""
         ax.set_xlim3d([-radius / 2, radius / 2])
         ax.set_ylim3d([0, radius])
-        ax.set_zlim3d([-radius / 3., radius * 2 / 3.])
-        # print(title)
+        ax.set_zlim3d([-radius / 3.0, radius * 2 / 3.0])
         fig.suptitle(title, fontsize=10)
         ax.grid(b=False)
 
-    def plot_xzPlane(minx, maxx, miny, minz, maxz):
-        ## Plot a plane XZ
+    def plot_xz_plane(minx, maxx, miny, minz, maxz):
+        """Plots an XZ plane in the 3D space."""
         verts = [
             [minx, miny, minz],
             [minx, miny, maxz],
@@ -49,85 +80,122 @@ def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset, figsize=(3
         xz_plane = Poly3DCollection([verts])
         xz_plane.set_facecolor((0.5, 0.5, 0.5, 0.5))
         ax.add_collection3d(xz_plane)
+    
+    def plot_xy_box(minx, maxx, miny, maxy, z):
+        """Plots an outline of an XY box in the 3D space."""
+        # Define the vertices of the box
+        verts = [
+            [minx, miny, z],
+            [minx, maxy, z],
+            [maxx, maxy, z],
+            [maxx, miny, z],
+            [minx, miny, z]  # Close the loop
+        ]
 
-    #         return ax
+        # Create a 3D line collection
+        xy_box = Line3DCollection([verts], colors="black")
+        ax.add_collection3d(xy_box)
 
-    # (seq_len, joints_num, 3)
+    # Reshape and scale joint data based on dataset type.
     data = joints.copy().reshape(len(joints), -1, 3)
-
-    # preparation related to specific datasets
     if dataset == 'kit':
-        data *= 0.003  # scale for visualization
+        data *= 0.003  # Scale for visualization
     elif dataset == 'humanml':
-        data *= 1.3  # scale for visualization
+        data *= 1.3  # Scale for visualization
     elif dataset in ['humanact12', 'uestc']:
-        data *= -1.5 # reverse axes, scale for visualization
+        data *= -1.5  # Reverse axes and scale for visualization
+    
+    if other_joints is not None:
+        other_data = other_joints.copy().reshape(len(joints), -1, 3)
+        if dataset == 'kit':
+            other_data *= 0.003  # Scale for visualization
+        elif dataset == 'humanml':
+            other_data *= 1.3  # Scale for visualization
+        elif dataset in ['humanact12', 'uestc']:
+            other_data *= -1.5  # Reverse axes and scale for visualization
 
+    # Create the figure and 3D axis.
     fig = plt.figure(figsize=figsize)
     plt.tight_layout()
-    ax = p3.Axes3D(fig)
+    ax = Axes3D(fig)
+    
     init()
-    MINS = data.min(axis=0).min(axis=0)
-    MAXS = data.max(axis=0).max(axis=0)
-    colors_blue = ["#4D84AA", "#5B9965", "#61CEB9", "#34C1E2", "#80B79A"]  # GT color
-    colors_orange = ["#DD5A37", "#D69E00", "#B75A39", "#FF6D00", "#DDB50E"]  # Generation color
-    colors = colors_orange
-    if vis_mode == 'upper_body':  # lower body taken fixed to input motion
-        colors[0] = colors_blue[0]
-        colors[1] = colors_blue[1]
-    elif vis_mode == 'gt':
-        colors = colors_blue
+
+    # Determine data bounds.
+    mins = data.min(axis=0).min(axis=0)
+    maxs = data.max(axis=0).max(axis=0)
+
+    # Define colors for different visualization modes.
+    colors_blue = ["#4D84AA", "#5B9965", "#61CEB9", "#34C1E2", "#80B79A"]
+    colors_orange = ["#DD5A37", "#D69E00", "#B75A39", "#FF6D00", "#DDB50E"]
+    colors = colors_orange if vis_mode != 'gt' else colors_blue
+
+    if vis_mode == 'upper_body':
+        colors[:2] = colors_blue[:2]
 
     frame_number = data.shape[0]
-    #     print(dataset.shape)
 
-    height_offset = MINS[1]
+    # Adjust heights and trajectories for visualization.
+    height_offset = mins[1]
     data[:, :, 1] -= height_offset
+    if other_joints is not None:
+        other_data[:, :, 1] -= height_offset
     trajec = data[:, 0, [0, 2]]
 
-    data[..., 0] -= data[:, 0:1, 0]
-    data[..., 2] -= data[:, 0:1, 2]
-
-    #     print(trajec.shape)
+    #data[..., 0] -= data[:, 0:1, 0]
+    #data[..., 2] -= data[:, 0:1, 2]
 
     def update(index):
-        #         print(index)
+        """Update the plot for a specific frame."""
         ax.lines = []
         ax.collections = []
-        ax.view_init(elev=120, azim=-90)
-        ax.dist = 7.5
-        #         ax =
-        plot_xzPlane(MINS[0] - trajec[index, 0], MAXS[0] - trajec[index, 0], 0, MINS[2] - trajec[index, 1],
-                     MAXS[2] - trajec[index, 1])
-        #         ax.scatter(dataset[index, :22, 0], dataset[index, :22, 1], dataset[index, :22, 2], color='black', s=3)
+        
+        # Plot XZ plane at the current frame.
+        if maxs[2] - mins[2] > 0.001:
+            ax.view_init(elev=90, azim=-90)
+            ax.dist = 7.5
+            plot_xz_plane(mins[0], maxs[0], 0, mins[2], maxs[2])
+        else:
+            ax.view_init(elev=90, azim=-90)
+            ax.dist = 7.5
+            plot_xy_box(-1, 1, -1, 1, maxs[2])
 
-        # if index > 1:
-        #     ax.plot3D(trajec[:index, 0] - trajec[index, 0], np.zeros_like(trajec[:index, 0]),
-        #               trajec[:index, 1] - trajec[index, 1], linewidth=1.0,
-        #               color='blue')
-        # #             ax = plot_xzPlane(ax, MINS[0], MAXS[0], 0, MINS[2], MAXS[2])
-
+        # Determine colors for the current frame.
         used_colors = colors_blue if index in gt_frames else colors
-        for i, (chain, color) in enumerate(zip(kinematic_tree, used_colors)):
-            if i < 5:
-                linewidth = 4.0
-            else:
-                linewidth = 2.0
-            ax.plot3D(data[index, chain, 0], data[index, chain, 1], data[index, chain, 2], linewidth=linewidth,
-                      color=color)
-        #         print(trajec[:index, 0].shape)
 
+        # Plot the kinematic tree connections.
+        for i, (chain, color) in enumerate(zip(kinematic_tree, used_colors)):
+            linewidth = 4.0 if i < 5 else 2.0
+            ax.plot3D(
+                data[index, chain, 0],
+                data[index, chain, 1],
+                data[index, chain, 2],
+                linewidth=linewidth,
+                color=color
+            )
+        if other_joints is not None:
+            for i, (chain, color) in enumerate(zip(kinematic_tree, colors_blue)):
+                linewidth = 4.0 if i < 5 else 2.0
+                ax.plot3D(
+                    other_data[index, chain, 0],
+                    other_data[index, chain, 1],
+                    other_data[index, chain, 2],
+                    linewidth=linewidth,
+                    color=color
+                )
+
+        # Remove axis labels for a cleaner visualization.
         plt.axis('off')
         ax.set_xticklabels([])
         ax.set_yticklabels([])
         ax.set_zticklabels([])
 
+    # Create the animation.
     ani = FuncAnimation(fig, update, frames=frame_number, interval=1000 / fps, repeat=False)
 
-    # writer = FFMpegFileWriter(fps=fps)
-    writergif = matplotlib.animation.PillowWriter(fps=30)
-    ani.save(save_path + ".gif", writer=writergif)
-    # ani = FuncAnimation(fig, update, frames=frame_number, interval=1000 / fps, repeat=False, init_func=init)
-    # ani.save(save_path, writer='pillow', fps=1000 / fps)
+    # Save the animation as a GIF.
+    writergif = matplotlib.animation.PillowWriter(fps=fps)
+    ani.save(f"{save_path}.gif", writer=writergif)
 
+    # Close the plot to free resources.
     plt.close()

@@ -233,11 +233,11 @@ def logkvs(d):
         logkv(k, v)
 
 
-def dumpkvs():
+def dumpkvs(**kwargs):
     """
     Write all of the diagnostics from the current iteration
     """
-    return get_current().dumpkvs()
+    return get_current().dumpkvs(**kwargs)
 
 
 def getkvs():
@@ -352,7 +352,7 @@ class Logger(object):
         self.name2val[key] = oldval * cnt / (cnt + 1) + val / (cnt + 1)
         self.name2cnt[key] = cnt + 1
 
-    def dumpkvs(self):
+    def dumpkvs(self, should_print=True):
         if self.comm is None:
             d = self.name2val
         else:
@@ -366,9 +366,11 @@ class Logger(object):
             if self.comm.rank != 0:
                 d["dummy"] = 1  # so we don't get a warning about empty dict
         out = d.copy()  # Return the dict for unit testing purposes
-        for fmt in self.output_formats:
-            if isinstance(fmt, KVWriter):
-                fmt.writekvs(d)
+        print(self.output_formats)
+        if should_print:
+            for fmt in self.output_formats:
+                if isinstance(fmt, KVWriter):
+                    fmt.writekvs(d)
         self.name2val.clear()
         self.name2cnt.clear()
         return out

@@ -204,6 +204,7 @@ class GaussianDiffusion:
         self.dataset_params_not_initialized = True
         self.dataset_torch_std = None
         self.dataset_torch_mean = None
+        self.cam_loss_factor = torch.tensor(3)
 
     def masked_l2(self, a, b, mask):
         # assuming a.shape == b.shape == bs, J, Jdim, seqlen
@@ -212,11 +213,7 @@ class GaussianDiffusion:
         loss = sum_flat(loss * mask.float())  # gives \sigma_euclidean over unmasked elements
         n_entries = a.shape[1] * a.shape[2]
         non_zero_elements = sum_flat(mask) * n_entries
-        # print('mask', mask.shape)
-        # print('non_zero_elements', non_zero_elements)
-        # print('loss', loss)
         mse_loss_val = loss / non_zero_elements
-        # print('mse_loss_val', mse_loss_val)
         return mse_loss_val
 
 
@@ -1317,6 +1314,7 @@ class GaussianDiffusion:
                     self.dataset_params_not_initialized = False
                     self.dataset_torch_std = torch.tensor(dataset.t2m_dataset.std).to(model_output.device)
                     self.dataset_torch_mean = torch.tensor(dataset.t2m_dataset.mean).to(model_output.device)
+                    self.cam_loss_factor = self.cam_loss_factor.to(model_output.device)
                 
                 def get_xyz_hunanml(sample):
                     # Recover XYZ *positions* from HumanML3D vector representation
@@ -1327,13 +1325,34 @@ class GaussianDiffusion:
                 target_xyz = get_xyz_hunanml(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
                 model_output_xyz = get_xyz_hunanml(model_output)  # [bs, nvertices, 3, nframes]
                 
-                cam_hor_angles, cam_ver_angles, cam_distance, cam_shift = sample_random_camera(target_xyz, distance_factor=2)
+                motion_tensor = torch.cat((target_xyz, model_output_xyz), dim=1)
+                cam_hor_angles, cam_ver_angles, cam_distance, cam_shift = sample_random_camera(motion_tensor, distance_factor=2)
                 target_xy, _ = perspective_projection_batch(target_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
                 model_output_xy, distances = perspective_projection_batch(model_output_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
-                loss = self.masked_l2(target_xy * distances, model_output_xy * distances, mask)
+                if (distances <= 0.5).any():
+                    terms["unstable_distances"] = (distances <= 0.5).sum().item()
+                    stable_distances = (distances > 0.5).expand(-1, -1, target_xy.shape[2], -1)
+                    def _where(a):
+                        return torch.where(stable_distances, a, torch.zeros_like(a))
+                    cam_loss = self.masked_l2(_where(target_xy), _where(model_output_xy), mask)
+                else:
+                    cam_loss = self.masked_l2(target_xy, model_output_xy, mask)
+                
+                num_joints = 22
+                rot_and_other_loss = self.masked_l2(target[:, [0], ...], model_output[:, [0], ...], mask)
+                rot_and_other_loss += self.masked_l2(target[:, num_joints *3 + 1:, ...], model_output[:, num_joints *3 + 1:, ...], mask)
+                
+
+                self.cam_loss_factor = (self.cam_loss_factor + 0.1 * sum_flat(rot_and_other_loss) / sum_flat(cam_loss)).detach() / 1.1
+
                 loss_max_value = 10
-                filtered_loss = torch.where(loss < loss_max_value, loss, torch.zeros_like(loss))
-                terms["loss"] = filtered_loss
+
+                cam_loss *= self.cam_loss_factor
+                terms["cam_loss"] = cam_loss
+                terms["rotvelfoot_loss"] = rot_and_other_loss
+                loss = cam_loss + rot_and_other_loss
+                terms["loss"] = cam_loss + rot_and_other_loss
+
 
                 debugging = False
                 if (loss > loss_max_value).any() and debugging:  # Check if any value in terms["loss"] is greater than 10
@@ -1343,11 +1362,15 @@ class GaussianDiffusion:
                         slices = tuple(slice(0, min(factor, dim)) for dim in tensor.shape)
                         return tensor[slices], [dim > factor for dim in tensor.shape]
                     import pickle as p
-                    with open("/home/amir.mann/temp/a.pkl", "wb") as f:
+                    import datetime
+                    time_str = datetime.datetime.now().strftime('%Y.%m.%d_%H.%M')
+                    with open(f"/home/amir.mann/temp_debuging_losses/a{time_str}.pkl", "wb") as f:
                         p.dump({
-                            "loss_explode": (loss > 2).cpu(),
-                            "target_xyz": target_xyz.cpu(),
-                            "model_output_xyz": model_output_xyz.cpu(),
+                            "model_output": model_output[loss > loss_max_value].cpu(),
+                            "target": target[loss > loss_max_value].cpu(),
+                            "loss_explode": (loss > loss_max_value).cpu(),
+                            "target_xyz": target_xyz[loss > loss_max_value].cpu(),
+                            "model_output_xyz": model_output_xyz[loss > loss_max_value].cpu(),
                             "cam_hor_angles": cam_hor_angles.cpu(),
                             "cam_ver_angles": cam_ver_angles.cpu(),
                             "cam_distance": cam_distance.cpu(),

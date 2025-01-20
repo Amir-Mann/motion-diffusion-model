@@ -135,7 +135,7 @@ def get_metric_statistics(values, replication_times):
     return mean, conf_interval
 
 
-def evaluation(eval_wrapper, gt_loader, eval_motion_loaders, log_file, replication_times, diversity_times, mm_num_times, run_mm=False):
+def evaluation(eval_wrapper, gt_loader, eval_motion_loaders, log_file, replication_times, diversity_times, mm_num_times, run_mm=False, log_function=print):
     with open(log_file, 'w') as f:
         all_metrics = OrderedDict({'Matching Score': OrderedDict({}),
                                    'R_precision': OrderedDict({}),
@@ -231,7 +231,7 @@ def evaluation(eval_wrapper, gt_loader, eval_motion_loaders, log_file, replicati
                     print(line)
                     print(line, file=f, flush=True)
         try:
-            print(f"\n\n\n     FID:\nGT  : {gt_fid}\nTest:{test_fid}\n\n\n")
+            log_function(f"\n     FID:\nGT  : {gt_fid}\nTest:{test_fid}\n")
         except Exception as e:
             print(e)
         return mean_dict

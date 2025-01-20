@@ -105,6 +105,9 @@ class TrainLoop:
         self.use_ddp = False
         self.ddp_model = self.model
 
+        self.unstable_distances_times = 0
+        self.unstable_distances_count = 0
+
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
 
@@ -149,11 +152,11 @@ class TrainLoop:
 
                 motion = motion.to(self.device)
                 cond['y'] = {key: val.to(self.device) if torch.is_tensor(val) else val for key, val in cond['y'].items()}
-                if self.other_data is not None:
+                if (self.other_data is not None) and self.args.sample_2d:
                     self.diffusion.loss_type = LossType.CAMERA_MSE if self.step % 2 == 0 else LossType.MSE
                 self.run_step(motion, cond)
-                if self.step % self.log_interval == 0:
-                    for k,v in logger.get_current().dumpkvs().items():
+                if (self.step + 1) % self.log_interval == 0:
+                    for k,v in logger.get_current().dumpkvs(should_print=False).items():
                         if k == 'loss':
                             print('step[{}]: loss[{:0.5f}]'.format(self.step+self.resume_step, v))
 
@@ -174,6 +177,9 @@ class TrainLoop:
                 self.step += 1
             if not (not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps):
                 break
+        
+        print("unstable_distances_times", self.unstable_distances_times)
+        print("unstable_distances_count", self.unstable_distances_count)
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
             self.save()
@@ -190,7 +196,7 @@ class TrainLoop:
             mm_num_times = 0  # mm is super slow hence we won't run it during training
             eval_dict = eval_humanml.evaluation(
                 self.eval_wrapper, self.eval_gt_data, self.eval_data, log_file,
-                replication_times=self.args.eval_rep_times, diversity_times=diversity_times, mm_num_times=mm_num_times, run_mm=False)
+                replication_times=self.args.eval_rep_times, diversity_times=diversity_times, mm_num_times=mm_num_times, run_mm=False, log_function=logger.log)
             print(eval_dict)
             for k, v in eval_dict.items():
                 if k.startswith('R_precision'):
@@ -250,6 +256,10 @@ class TrainLoop:
             else:
                 with self.ddp_model.no_sync():
                     losses = compute_losses()
+            if "unstable_distances" in losses:
+                self.unstable_distances_times += 1
+                self.unstable_distances_count += int(losses["unstable_distances"])
+                losses.pop("unstable_distances")
 
             if isinstance(self.schedule_sampler, LossAwareSampler):
                 self.schedule_sampler.update_with_local_losses(
