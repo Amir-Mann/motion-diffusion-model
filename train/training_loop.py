@@ -153,7 +153,7 @@ class TrainLoop:
                 motion = motion.to(self.device)
                 cond['y'] = {key: val.to(self.device) if torch.is_tensor(val) else val for key, val in cond['y'].items()}
                 if (self.other_data is not None) and self.args.sample_2d:
-                    self.diffusion.loss_type = LossType.CAMERA_MSE if self.step % 2 == 0 else LossType.MSE
+                    self.diffusion.loss_type = LossType.CAMERA_MSE if (self.step + 1) % 2 == 0 else LossType.MSE
                 self.run_step(motion, cond)
                 if self.step % self.log_interval == 0:
                     for k,v in logger.get_current().dumpkvs(should_print=False).items():
