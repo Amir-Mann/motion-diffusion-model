@@ -65,17 +65,17 @@ def parse_pickle(data, keys):
     caption = ""
     parsed_data = None
     for key in keys:
+        print(key, str(parsed_data)[:10])
         caption += " " + key
         if "eval:" == key[:len("eval:")]:
             key = eval(key[len("eval:"):])
-            evaled_key = key
             print("eval inside parse_pickle:", key, type(key))
         if parsed_data is None:
             parsed_data = data[key]
         else:
             parsed_data = parsed_data[key]
     
-    parsed_data = parsed_data * data["distances"][evaled_key]
+    #parsed_data = parsed_data * data["distances"][evaled_key]
     if isinstance(parsed_data, torch.Tensor):
         if len(parsed_data.shape) > 3:
             raise RuntimeError("Data is of shape larger then 3, maybe use some index.")
@@ -88,6 +88,7 @@ def parse_pickle(data, keys):
     return parsed_data, caption
 
 def get_data(args, sample):
+    print(sample, args.pickle_keys)
     other_data = None
     if os.path.isfile(sample):
         with open(sample, "rb") as f:
@@ -101,6 +102,8 @@ def get_data(args, sample):
                 if args.other_pickle_keys:
                     other_data, cap = parse_pickle(pickle_data.copy(), args.other_pickle_keys)
                     caption += " other:" + cap
+            else:
+                raise RuntimeError(f"Got non .npy and non .pkl file {sample}")
         
     elif re.findall("\d+", sample) and re.findall("\d+", sample)[0] == sample:
         with open(f"/home/amir.mann/MDM/dataset/HumanML3D/new_joints/{int(sample):06}.npy", "rb") as f:
@@ -196,10 +199,16 @@ def get_argparse_arguments():
 
     group.add_argument("-s", "--samples_to_visualize", required=True,
                        help="Samples To visualize, can be either an integer to use humanML motions range of integers(3-10) or path to pickle / npy file")
+    group.add_argument("--output_dir", default='/home/amir.mann/temp', type=str,
+                       help="Path to results dir (auto created by the script).")
+    group.add_argument("--dont_plot", action='store_true', help="Skips ploting, for debugging.")
+    group.add_argument("--date_save", action='store_true', help="Save the animation in a newfile with a different name.")
+
     group.add_argument("--pickle_keys", nargs="*", default=[],
                        help="Keys to find out of a pickled file, for example --pickle_keys model_output_xyz eval:[7] would get data['model_output_xyz'][[7]].")
     group.add_argument("--other_pickle_keys", nargs="*", default=[],
-                       help="Keys to find out of a pickled file as other motion, for example --pickle_keys model_output_xyz eval:[7] would get data['model_output_xyz'][[7]].")
+                       help="Keys to find out of a pickled file as other motion, for example --other_pickle_keys model_output_xyz eval:[7] would get data['model_output_xyz'][[7]].")
+    
     group.add_argument("--sample_2d", action="store_true",
                        help="Take the 3d data and sample it into 2d.")
     group.add_argument("--num_repetitions", default=3, type=int,
@@ -210,15 +219,11 @@ def get_argparse_arguments():
                        help="The vertical angle upper bound to sample from.")
     group.add_argument("--ver_angle_l", default="-pi/12",
                        help="The vertical angle lower bound to sample from.")
-    group.add_argument("--dataset", default='humanml', choices=['humanml', 'kit', 'humanact12', 'uestc'], type=str,
-                       help="Dataset name (choose from list).")
-    group.add_argument("--output_dir", default='/home/amir.mann/temp', type=str,
-                       help="Path to results dir (auto created by the script).")
     group.add_argument("--distance", default=2.0, type=float,
                        help="Distance between camera and the closest point in the motion on the xz plain")
-    group.add_argument("--dont_plot", action='store_true', help="Skips ploting, for debugging.")
-    group.add_argument("--date_save", action='store_true', help="Save the animation in a newfile with a different name.")
 
+    group.add_argument("--dataset", default='humanml', choices=['humanml', 'kit', 'humanact12', 'uestc'], type=str,
+                       help="Dataset name (choose from list).")
     group.add_argument("--unconstrained", action='store_true', help="Legacy.")
     group.add_argument("--num_samples", default=10, type=int,help="Legacy.")
     group.add_argument("--guidance_param", default=2.5, type=float, help="Legacy.")
@@ -234,7 +239,8 @@ def main():
             print(sample, end=" ")
             save_a_skeleton(args, sample)
     else:
-        save_a_skeleton(args, args.samples_to_visualize)
+        for sample in args.samples_to_visualize.split("&&"):
+            save_a_skeleton(args, sample)
 
 if __name__ == "__main__":
     main()

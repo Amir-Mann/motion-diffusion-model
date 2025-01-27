@@ -284,9 +284,8 @@ if __name__ == '__main__':
     logger.configure()
 
     logger.log("creating data loader...")
-    split = 'test'
-    gt_loader = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=None, split=split, hml_mode='gt')
-    gen_loader = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=None, split=split, hml_mode='eval')
+    gt_loader = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=None, split=args.split, hml_mode='gt')
+    gen_loader = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=None, split=args.split, hml_mode='eval')
     num_actions = gen_loader.dataset.num_actions
 
     logger.log("Creating model and diffusion...")
@@ -305,7 +304,7 @@ if __name__ == '__main__':
         ################
         ## HumanML3D Dataset##
         ################
-        'vald': lambda: get_mdm_loader(
+        args.split if args.split != "val" else "vald": lambda: get_mdm_loader(
             model, diffusion, args.batch_size,
             gen_loader, mm_num_samples, mm_num_repeats, gt_loader.dataset.opt.max_motion_length, num_samples_limit, args.guidance_param
         )

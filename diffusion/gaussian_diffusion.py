@@ -138,6 +138,9 @@ class GaussianDiffusion:
         lambda_root_vel=0.,
         lambda_vel_rcxyz=0.,
         lambda_fc=0.,
+        lambda_cam=1.,
+        lambda_cam_vel=1.,
+        lambda_cam_complement=1.
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
@@ -156,6 +159,9 @@ class GaussianDiffusion:
         self.lambda_root_vel = lambda_root_vel
         self.lambda_vel_rcxyz = lambda_vel_rcxyz
         self.lambda_fc = lambda_fc
+        self.lambda_cam = lambda_cam
+        self.lambda_cam_vel = lambda_cam_vel
+        self.lambda_cam_complement = lambda_cam_complement
 
         if self.lambda_rcxyz > 0. or self.lambda_vel > 0. or self.lambda_root_vel > 0. or \
                 self.lambda_vel_rcxyz > 0. or self.lambda_fc > 0.:
@@ -204,15 +210,16 @@ class GaussianDiffusion:
         self.dataset_params_not_initialized = True
         self.dataset_torch_std = None
         self.dataset_torch_mean = None
-        self.cam_loss_factor = torch.tensor(3)
 
-    def masked_l2(self, a, b, mask):
+    def masked_l2(self, a, b, mask, scaled=True):
         # assuming a.shape == b.shape == bs, J, Jdim, seqlen
         # assuming mask.shape == bs, 1, 1, seqlen
         loss = self.l2_loss(a, b)
         loss = sum_flat(loss * mask.float())  # gives \sigma_euclidean over unmasked elements
         n_entries = a.shape[1] * a.shape[2]
         non_zero_elements = sum_flat(mask) * n_entries
+        if not scaled:
+            return loss, non_zero_elements
         mse_loss_val = loss / non_zero_elements
         return mse_loss_val
 
@@ -1314,7 +1321,6 @@ class GaussianDiffusion:
                     self.dataset_params_not_initialized = False
                     self.dataset_torch_std = torch.tensor(dataset.t2m_dataset.std).to(model_output.device)
                     self.dataset_torch_mean = torch.tensor(dataset.t2m_dataset.mean).to(model_output.device)
-                    self.cam_loss_factor = self.cam_loss_factor.to(model_output.device)
                 
                 def get_xyz_hunanml(sample):
                     # Recover XYZ *positions* from HumanML3D vector representation
@@ -1325,35 +1331,65 @@ class GaussianDiffusion:
                 target_xyz = get_xyz_hunanml(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
                 model_output_xyz = get_xyz_hunanml(model_output)  # [bs, nvertices, 3, nframes]
                 
-                motion_tensor = torch.cat((target_xyz, model_output_xyz), dim=1)
+                motion_tensor = torch.cat((target_xyz, ), dim=1)
                 cam_hor_angles, cam_ver_angles, cam_distance, cam_shift = sample_random_camera(motion_tensor, distance_factor=2)
-                target_xy, _ = perspective_projection_batch(target_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
-                model_output_xy, distances = perspective_projection_batch(model_output_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
-                if (distances <= 0.5).any():
-                    terms["unstable_distances"] = (distances <= 0.5).sum().item()
-                    stable_distances = (distances > 0.5).expand(-1, -1, target_xy.shape[2], -1)
-                    def _where(a):
-                        return torch.where(stable_distances, a, torch.zeros_like(a))
-                    cam_loss = self.masked_l2(_where(target_xy), _where(model_output_xy), mask)
-                else:
-                    cam_loss = self.masked_l2(target_xy, model_output_xy, mask)
+                def calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift):
+                    target_xy, _ = perspective_projection_batch(target_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
+                    model_output_xy, distances = perspective_projection_batch(model_output_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
+                    target_vel_xy = target_xy[..., :-1] - target_xy[..., 1:]
+                    model_output_vel_xy = model_output_xy[..., :-1] - model_output_xy[..., 1:]
+                    if False:
+                        import pickle as p
+                        import datetime
+                        time_str = datetime.datetime.now().strftime('%Y.%m.%d_%H.%M')
+                        path = f"/home/amir.mann/temp_debuging_losses/a{cam_hor_angles.flatten()[0].item()}_{time_str}.pkl"
+                        
+                        with open(path, "wb") as f:
+                            print(f"dumping to {path}")
+                            p.dump({
+                                "cam_hor_angles": cam_hor_angles.cpu(),
+                                "cam_ver_angles": cam_ver_angles.cpu(),
+                                "cam_distance": cam_distance.cpu(),
+                                "cam_shift": cam_shift.cpu(),
+                                "target_xy": target_xy.cpu(),
+                                "model_output_xy": model_output_xy.cpu(),
+                                "target_vel_xy": target_vel_xy.cpu(),
+                                "model_output_vel_xy": model_output_vel_xy.cpu(),
+                                "mask": mask.cpu(),
+                                "distances": distances.cpu(),
+                                "t": t.cpu(),
+                            }, f)
+                    if (distances <= 0.5).any():
+                        terms["unstable_distances"] = (distances <= 0.5).sum().item()
+                        stable_distances = (distances > 0.5).expand(-1, -1, target_xy.shape[2], -1)
+                        def _where(a):
+                            return torch.where(stable_distances[..., -a.shape[-1]:], a, torch.zeros_like(a))
+                        pos_loss = self.masked_l2(_where(target_xy), _where(model_output_xy), mask)
+                        vel_loss = self.masked_l2(_where(target_vel_xy), _where(model_output_vel_xy), mask[..., 1:])
+                        return pos_loss, vel_loss
+                    else:
+                        pos_loss = self.masked_l2(target_xy, model_output_xy, mask)
+                        vel_loss = self.masked_l2(target_vel_xy, model_output_vel_xy, mask[..., :-1])
+                        return pos_loss, vel_loss
                 
+                cam_losses1 = calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
+                #cam_losses2 = calc_cam_loss((cam_hor_angles + (np.pi / 2)) % (2 * np.pi), cam_ver_angles, cam_distance, cam_shift)
+                cam_loss = cam_losses1[0]# + cam_losses2[0]
+                cam_vel_loss = cam_losses1[1]# + cam_losses2[1]
                 num_joints = 22
                 rot_and_other_loss = self.masked_l2(target[:, [0], ...], model_output[:, [0], ...], mask)
                 rot_and_other_loss += self.masked_l2(target[:, num_joints *3 + 1:, ...], model_output[:, num_joints *3 + 1:, ...], mask)
-                
-
-                self.cam_loss_factor = (self.cam_loss_factor + 0.1 * sum_flat(rot_and_other_loss) / sum_flat(cam_loss)).detach() / 1.1
+                #mse_movement_loss = self.masked_l2(target[:, 1:num_joints *3 + 1, ...], model_output[:, 1:num_joints *3 + 1, ...], mask)
+                terms["rot_mse (not used)"] = self.masked_l2(target, model_output, mask) # mean_flat(rot_mse)
 
                 loss_max_value = 10
 
-                cam_loss *= self.cam_loss_factor
-                terms["cam_loss"] = cam_loss
-                terms["rotvelfoot_loss"] = rot_and_other_loss
-                loss = cam_loss + rot_and_other_loss
-                terms["loss"] = cam_loss + rot_and_other_loss
-
-
+                terms["cam_pos_loss"] = self.lambda_cam * cam_loss
+                terms["cam_vel_loss"] = self.lambda_cam * self.lambda_cam_vel * cam_vel_loss
+                terms["rotvelfoot_loss"] = self.lambda_cam_complement * rot_and_other_loss
+                loss = terms["cam_pos_loss"] + terms["rotvelfoot_loss"] + terms["cam_vel_loss"]
+                terms["loss"] = loss
+                
                 debugging = False
                 if (loss > loss_max_value).any() and debugging:  # Check if any value in terms["loss"] is greater than 10
                     print("Got a large loss...")

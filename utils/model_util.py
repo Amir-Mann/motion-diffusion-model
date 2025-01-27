@@ -6,8 +6,8 @@ from utils.parser_util import get_cond_mode
 
 def load_model_wo_clip(model, state_dict):
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-    assert len(unexpected_keys) == 0
-    assert all([k.startswith('clip_model.') for k in missing_keys])
+    assert len(unexpected_keys) == 0, f"Got unexpected keys {unexpected_keys}"
+    assert all([k.startswith('clip_model.') for k in missing_keys]), "Missing keys " + str([k for k in missing_keys if not k.startswtih('clip_model.')])
 
 
 def create_model_and_diffusion(args, data):
@@ -87,4 +87,7 @@ def create_gaussian_diffusion(args):
         lambda_vel=args.lambda_vel,
         lambda_rcxyz=args.lambda_rcxyz,
         lambda_fc=args.lambda_fc,
+        lambda_cam=args.lambda_cam,
+        lambda_cam_vel=args.lambda_cam_vel,
+        lambda_cam_complement=args.lambda_cam_complement
     )

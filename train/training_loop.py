@@ -49,7 +49,7 @@ class TrainLoop:
         self.weight_decay = args.weight_decay
         self.lr_anneal_steps = args.lr_anneal_steps
 
-        self.step = 0
+        self.step = 1
         self.resume_step = 0
         self.global_batch = self.batch_size # * dist.get_world_size()
         self.num_steps = args.num_steps
@@ -141,7 +141,7 @@ class TrainLoop:
     def run_loop(self):
 
         for epoch in range(self.num_epochs):
-            print(f'\nStarting epoch {epoch} / {self.num_epochs}')
+            print(f'Starting epoch {epoch} / {self.num_epochs}')
             if self.other_data is None:
                 generator = self.data
             else:
@@ -155,7 +155,7 @@ class TrainLoop:
                 if (self.other_data is not None) and self.args.sample_2d:
                     self.diffusion.loss_type = LossType.CAMERA_MSE if self.step % 2 == 0 else LossType.MSE
                 self.run_step(motion, cond)
-                if (self.step + 1) % self.log_interval == 0:
+                if self.step % self.log_interval == 0:
                     for k,v in logger.get_current().dumpkvs(should_print=False).items():
                         if k == 'loss':
                             print('step[{}]: loss[{:0.5f}]'.format(self.step+self.resume_step, v))
@@ -268,7 +268,7 @@ class TrainLoop:
 
             loss = (losses["loss"] * weights).mean()
             log_loss_dict(
-                self.diffusion, t, {k: v * weights for k, v in losses.items()}
+                self.diffusion, t, {k: v * weights for k, v in losses.items()}, log_quartiles=(0 if self.args.sample_2d else 4)
             )
             self.mp_trainer.backward(loss)
 
@@ -338,10 +338,12 @@ def find_resume_checkpoint():
     return None
 
 
-def log_loss_dict(diffusion, ts, losses):
+def log_loss_dict(diffusion, ts, losses, log_quartiles=4):
     for key, values in losses.items():
         logger.logkv_mean(key, values.mean().detach().cpu().item())
         # Log the quantiles (four quartiles, in particular).
+        if log_quartiles == 0:
+            continue
         for sub_t, sub_loss in zip(ts.cpu().numpy(), values.detach().cpu().numpy()):
-            quartile = int(4 * sub_t / diffusion.num_timesteps)
+            quartile = int(log_quartiles * sub_t / diffusion.num_timesteps)
             logger.logkv_mean(f"{key}_q{quartile}", sub_loss)

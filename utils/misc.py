@@ -1,3 +1,4 @@
+from itertools import cycle
 import torch
 
 
@@ -49,7 +50,7 @@ class AlternatingIterable:
             iterable2 (iterable): The second generator (can continue cycling if needed).
         """
         self.iterable1 = iter(iterable1)
-        self.iterable2 = iter(iterable2)
+        self.iterable2 = cycle(iterable2)
         self.switch = True  # To alternate between iterable1 and iterable
 
     def __iter__(self):
@@ -66,12 +67,7 @@ class AlternatingIterable:
             except StopIteration:
                 raise StopIteration  # Stop when iterable1 is exhausted
         else:
-            try:
-                item = next(self.iterable2)
-            except StopIteration:
-                # Restart iterable2 when exhausted
-                self.iterable2 = iter(self.iterable2)
-                item = next(self.iterable2)
+            item = next(self.iterable2)
 
         self.switch = not self.switch  # Toggle the switch
         return item
