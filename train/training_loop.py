@@ -60,18 +60,29 @@ class TrainLoop:
         logger.configure(dir=args.save_dir)
 
         self._load_and_sync_parameters()
+        
+
+        self.save_dir = args.save_dir
+        self.overwrite = args.overwrite
         self.mp_trainer = MixedPrecisionTrainer(
             model=self.model,
             use_fp16=self.use_fp16,
             fp16_scale_growth=self.fp16_scale_growth,
         )
-
-        self.save_dir = args.save_dir
-        self.overwrite = args.overwrite
-
         self.opt = AdamW(
             self.mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay
         )
+        if self.other_data is not None:
+            self.other_mp_trainer = MixedPrecisionTrainer(
+                model=self.model,
+                use_fp16=self.use_fp16,
+                fp16_scale_growth=self.fp16_scale_growth,
+            )
+            self.other_opt = AdamW(
+                self.other_mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay
+            )
+            self.optimize_other_now = False
+
         if self.resume_step:
             self._load_optimizer_state()
             # Model was resumed, either due to a restart or a checkpoint
@@ -153,7 +164,8 @@ class TrainLoop:
                 motion = motion.to(self.device)
                 cond['y'] = {key: val.to(self.device) if torch.is_tensor(val) else val for key, val in cond['y'].items()}
                 if (self.other_data is not None) and self.args.sample_2d:
-                    self.diffusion.loss_type = LossType.CAMERA_MSE if (self.step + 1) % 2 == 0 else LossType.MSE
+                    self.diffusion.loss_type = LossType.CAMERA_MSE if self.step % 2 != 0 else LossType.MSE
+                    self.optimize_other_now = self.step % 2 != 0
                 self.run_step(motion, cond)
                 if self.step % self.log_interval == 0:
                     for k,v in logger.get_current().dumpkvs(should_print=False).items():
@@ -227,12 +239,18 @@ class TrainLoop:
 
     def run_step(self, batch, cond):
         self.forward_backward(batch, cond)
-        self.mp_trainer.optimize(self.opt)
+        if self.other_data and self.optimize_other_now:
+            self.other_mp_trainer.optimize(self.other_opt)
+        else:
+            self.mp_trainer.optimize(self.opt)
         self._anneal_lr()
         self.log_step()
 
     def forward_backward(self, batch, cond):
-        self.mp_trainer.zero_grad()
+        if self.other_data and self.optimize_other_now:
+            self.other_mp_trainer.zero_grad()
+        else:
+            self.mp_trainer.zero_grad()
         for i in range(0, batch.shape[0], self.microbatch):
             # Eliminates the microbatch feature
             assert i == 0
@@ -270,7 +288,10 @@ class TrainLoop:
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}, log_quartiles=(0 if self.args.sample_2d else 4)
             )
-            self.mp_trainer.backward(loss)
+            if self.other_data and self.optimize_other_now:
+                self.other_mp_trainer.backward(loss)
+            else:
+                self.mp_trainer.backward(loss)
 
     def _anneal_lr(self):
         if not self.lr_anneal_steps:

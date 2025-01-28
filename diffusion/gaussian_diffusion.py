@@ -1331,7 +1331,7 @@ class GaussianDiffusion:
                 target_xyz = get_xyz_hunanml(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
                 model_output_xyz = get_xyz_hunanml(model_output)  # [bs, nvertices, 3, nframes]
                 
-                motion_tensor = torch.cat((target_xyz, ), dim=1)
+                motion_tensor = torch.cat((target_xyz, model_output_xyz), dim=1)
                 cam_hor_angles, cam_ver_angles, cam_distance, cam_shift = sample_random_camera(motion_tensor, distance_factor=2)
                 def calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift):
                     target_xy, _ = perspective_projection_batch(target_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
