@@ -151,13 +151,13 @@ class TrainLoop:
 
     def run_loop(self):
 
-        for epoch in range(self.num_epochs):
-            print(f'Starting epoch {epoch} / {self.num_epochs}')
+        for epoch in tqdm(range(self.num_epochs)):
+            #print(f'Starting epoch {epoch} / {self.num_epochs}')
             if self.other_data is None:
                 generator = self.data
             else:
                 generator = AlternatingIterable(self.data, self.other_data)
-            for motion, cond in tqdm(generator):
+            for motion, cond in generator:
                 if not (not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps):
                     break
 
@@ -171,6 +171,7 @@ class TrainLoop:
                     for k,v in logger.get_current().dumpkvs(should_print=False).items():
                         if k == 'loss':
                             print('step[{}]: loss[{:0.5f}]'.format(self.step+self.resume_step, v))
+                            assert str(v) != "nan", "nan loss, stoping training"
 
                         if k in ['step', 'samples'] or '_q' in k:
                             continue

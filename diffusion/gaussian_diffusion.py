@@ -1331,7 +1331,7 @@ class GaussianDiffusion:
                 target_xyz = get_xyz_hunanml(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
                 model_output_xyz = get_xyz_hunanml(model_output)  # [bs, nvertices, 3, nframes]
                 
-                motion_tensor = torch.cat((target_xyz, model_output_xyz), dim=1)
+                motion_tensor = torch.cat((target_xyz, ), dim=1)
                 cam_hor_angles, cam_ver_angles, cam_distance, cam_shift = sample_random_camera(motion_tensor, distance_factor=2)
                 def calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift):
                     target_xy, _ = perspective_projection_batch(target_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
@@ -1359,19 +1359,16 @@ class GaussianDiffusion:
                                 "distances": distances.cpu(),
                                 "t": t.cpu(),
                             }, f)
-                    if (distances <= 0.5).any():
-                        terms["unstable_distances"] = (distances <= 0.5).sum().item()
-                        stable_distances = (distances > 0.5).expand(-1, -1, target_xy.shape[2], -1)
-                        def _where(a):
-                            return torch.where(stable_distances[..., -a.shape[-1]:], a, torch.zeros_like(a))
-                        pos_loss = self.masked_l2(_where(target_xy), _where(model_output_xy), mask)
-                        vel_loss = self.masked_l2(_where(target_vel_xy), _where(model_output_vel_xy), mask[..., 1:])
-                        return pos_loss, vel_loss
-                    else:
-                        pos_loss = self.masked_l2(target_xy, model_output_xy, mask)
-                        vel_loss = self.masked_l2(target_vel_xy, model_output_vel_xy, mask[..., :-1])
-                        return pos_loss, vel_loss
-                
+                    batch_size_distances = distances.sum(dim=(1,2,3)).squeeze() / (distances.shape[1] * distances.shape[3]) 
+                    DISTANCE_THRESHOLD = 0.5
+                    terms["unstable_distances"] = (distances <= DISTANCE_THRESHOLD).sum().item()
+                    stable_distances = (distances > DISTANCE_THRESHOLD).expand(-1, -1, target_xy.shape[2], -1)
+                    def _where(a):
+                        return torch.where(stable_distances[..., -a.shape[-1]:], a, torch.zeros_like(a))
+                    pos_loss = self.masked_l2(_where(target_xy), _where(model_output_xy), mask) * batch_size_distances
+                    vel_loss = self.masked_l2(_where(target_vel_xy), _where(model_output_vel_xy), mask[..., 1:]) * batch_size_distances
+                    return pos_loss, vel_loss
+                    
                 cam_losses1 = calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
                 #cam_losses2 = calc_cam_loss((cam_hor_angles + (np.pi / 2)) % (2 * np.pi), cam_ver_angles, cam_distance, cam_shift)
                 cam_loss = cam_losses1[0]# + cam_losses2[0]

@@ -92,9 +92,9 @@ def add_model_options(parser):
     group.add_argument("--lambda_rcxyz", default=0.0, type=float, help="Joint positions loss.")
     group.add_argument("--lambda_vel", default=0.0, type=float, help="Joint velocity loss.")
     group.add_argument("--lambda_fc", default=0.0, type=float, help="Foot contact loss.")
-    group.add_argument("--lambda_cam", default=20.0, type=float, help="Camera joint loss.")
-    group.add_argument("--lambda_cam_vel", default=50.0, type=float, help="Camera velocity loss.")
-    group.add_argument("--lambda_cam_complement", default=0.4, type=float, help="Rotation and other factors losses.")
+    group.add_argument("--lambda_cam", default=7.0, type=float, help="Camera joint loss.")
+    group.add_argument("--lambda_cam_vel", default=100.0, type=float, help="Camera velocity loss.")
+    group.add_argument("--lambda_cam_complement", default=0.0, type=float, help="Rotation and other factors losses.")
     group.add_argument("--unconstrained", action='store_true',
                        help="Model is trained unconditionally. That is, it is constrained by neither text nor action. "
                             "Currently tested on HumanAct12 only.")

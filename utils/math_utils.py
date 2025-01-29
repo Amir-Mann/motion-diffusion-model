@@ -108,7 +108,7 @@ def batch_rotation_matrix(hor_angles, ver_angles):
     x_rot = batch_axis_rotation_matrices(ver_angles, "x")
     return torch.bmm(y_rot, x_rot)
 
-def perspective_projection_batch(motion_3d, hor_angles, ver_angles, cam_distances, shift=None):
+def perspective_projection_batch(motion_3d, hor_angles, ver_angles, cam_distances, shift=None, distance_stability=1e-6):
     """
     ret: Tensor of shape [batch_size, njoints, 2, nframes]
     motion_3d (torch.Tensor): Input 3D motion tensor of shape [batch_size, njoints, 3, nframes].
@@ -131,6 +131,7 @@ def perspective_projection_batch(motion_3d, hor_angles, ver_angles, cam_distance
     # Compute perspective projection
     cam_distances = cam_distances.view(-1, 1, 1, 1)  # [batch_size, 1, 1, 1]
     distances_tensor = - rotated_motion[..., [2], :] + cam_distances
+    distances_tensor = torch.abs(distances_tensor) + distance_stability
     proj_2d = rotated_motion[..., :2, :] / (distances_tensor.detach())  # [batch_size, njoints, 2, nframes]
 
     return proj_2d, distances_tensor
