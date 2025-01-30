@@ -18,6 +18,7 @@ from diffusion.losses import normal_kl, discretized_gaussian_log_likelihood
 from data_loaders.humanml.scripts import motion_process
 from utils.math_utils import perspective_projection_batch, sample_random_camera
 from data_loaders.humanml.scripts.motion_process import recover_from_ric
+from data_loaders.humanml.utils.paramUtil import t2m_kinematic_chain, kit_kinematic_chain
 
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps, scale_betas=1.):
@@ -210,6 +211,8 @@ class GaussianDiffusion:
         self.dataset_params_not_initialized = True
         self.dataset_torch_std = None
         self.dataset_torch_mean = None
+        self.kinematic_tree_sources = []
+        self.kinematic_tree_dests = []
 
     def masked_l2(self, a, b, mask, scaled=True):
         # assuming a.shape == b.shape == bs, J, Jdim, seqlen
@@ -1319,6 +1322,10 @@ class GaussianDiffusion:
             if self.loss_type == LossType.CAMERA_MSE:
                 if self.dataset_params_not_initialized:
                     self.dataset_params_not_initialized = False
+                    assert hasattr(dataset, "t2m_dataset"), "CAMERA_MSE loss can currently be calculated only for t2m_dataset"
+                    for chain in t2m_kinematic_chain:
+                        self.kinematic_tree_sources.extend(chain[:-1])
+                        self.kinematic_tree_dests.extend(chain[1:])
                     self.dataset_torch_std = torch.tensor(dataset.t2m_dataset.std).to(model_output.device)
                     self.dataset_torch_mean = torch.tensor(dataset.t2m_dataset.mean).to(model_output.device)
                 
@@ -1334,45 +1341,31 @@ class GaussianDiffusion:
                 motion_tensor = torch.cat((target_xyz, ), dim=1)
                 cam_hor_angles, cam_ver_angles, cam_distance, cam_shift = sample_random_camera(motion_tensor, distance_factor=2)
                 def calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift):
+                    #[batch_size, njoints, 2, nframes]
                     target_xy, _ = perspective_projection_batch(target_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
                     model_output_xy, distances = perspective_projection_batch(model_output_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
-                    target_vel_xy = target_xy[..., :-1] - target_xy[..., 1:]
-                    model_output_vel_xy = model_output_xy[..., :-1] - model_output_xy[..., 1:]
-                    if False:
-                        import pickle as p
-                        import datetime
-                        time_str = datetime.datetime.now().strftime('%Y.%m.%d_%H.%M')
-                        path = f"/home/amir.mann/temp_debuging_losses/a{cam_hor_angles.flatten()[0].item()}_{time_str}.pkl"
-                        
-                        with open(path, "wb") as f:
-                            print(f"dumping to {path}")
-                            p.dump({
-                                "cam_hor_angles": cam_hor_angles.cpu(),
-                                "cam_ver_angles": cam_ver_angles.cpu(),
-                                "cam_distance": cam_distance.cpu(),
-                                "cam_shift": cam_shift.cpu(),
-                                "target_xy": target_xy.cpu(),
-                                "model_output_xy": model_output_xy.cpu(),
-                                "target_vel_xy": target_vel_xy.cpu(),
-                                "model_output_vel_xy": model_output_vel_xy.cpu(),
-                                "mask": mask.cpu(),
-                                "distances": distances.cpu(),
-                                "t": t.cpu(),
-                            }, f)
+                    def motion_factors(motion_2d):
+                        vel_2d = motion_2d[..., 1:] - motion_2d[..., :-1]
+                        join_vectors_2d = motion_2d[:, self.kinematic_tree_dests, ...] - motion_2d[:, self.kinematic_tree_sources, ...]
+                        joint_lengths_2d = torch.sqrt(torch.sum(join_vectors_2d ** 2, dim=2, keepdim=True))
+                        lengths_vel_2d = joint_lengths_2d[..., 1:] - joint_lengths_2d[..., :-1]
+                        rotaions_2d = torch.atan2(join_vectors_2d[..., 1, :], join_vectors_2d[..., 0, :]).unsqueeze(2)
+                        return {"pos_2d":motion_2d, "vel_2d":vel_2d, "joint_lengths_2d":joint_lengths_2d, "lengths_vel_2d":lengths_vel_2d, "rotaions_2d":rotaions_2d}
+                    target_factors_xy = motion_factors(target_xy)
+                    model_output_factors_xy = motion_factors(model_output_xy)
                     batch_size_distances = distances.sum(dim=(1,2,3)).squeeze() / (distances.shape[1] * distances.shape[3]) 
                     DISTANCE_THRESHOLD = 0.5
                     terms["unstable_distances"] = (distances <= DISTANCE_THRESHOLD).sum().item()
                     stable_distances = (distances > DISTANCE_THRESHOLD).expand(-1, -1, target_xy.shape[2], -1)
                     def _where(a):
-                        return torch.where(stable_distances[..., -a.shape[-1]:], a, torch.zeros_like(a))
-                    pos_loss = self.masked_l2(_where(target_xy), _where(model_output_xy), mask) * batch_size_distances
-                    vel_loss = self.masked_l2(_where(target_vel_xy), _where(model_output_vel_xy), mask[..., 1:]) * batch_size_distances
-                    return pos_loss, vel_loss
+                        return torch.where(stable_distances[:, -a.shape[1]:, :, -a.shape[3]:], a, torch.zeros_like(a))
+                    losses = {
+                        key + "_mse": self.masked_l2(_where(target_val), _where(model_output_factors_xy[key]), mask[... ,-target_val.shape[-1]:]) * batch_size_distances
+                        for key, target_val in target_factors_xy.items()
+                    }
+                    return losses
                     
-                cam_losses1 = calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
-                #cam_losses2 = calc_cam_loss((cam_hor_angles + (np.pi / 2)) % (2 * np.pi), cam_ver_angles, cam_distance, cam_shift)
-                cam_loss = cam_losses1[0]# + cam_losses2[0]
-                cam_vel_loss = cam_losses1[1]# + cam_losses2[1]
+                cam_losses = calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
                 num_joints = 22
                 rot_and_other_loss = self.masked_l2(target[:, [0], ...], model_output[:, [0], ...], mask)
                 rot_and_other_loss += self.masked_l2(target[:, num_joints *3 + 1:, ...], model_output[:, num_joints *3 + 1:, ...], mask)
@@ -1381,8 +1374,9 @@ class GaussianDiffusion:
 
                 loss_max_value = 10
 
-                terms["cam_pos_loss"] = self.lambda_cam * cam_loss
-                terms["cam_vel_loss"] = self.lambda_cam * self.lambda_cam_vel * cam_vel_loss
+                terms["cam_pos_loss"] = self.lambda_cam * cam_losses["pos_2d_mse"]
+                terms["cam_vel_loss"] = self.lambda_cam * self.lambda_cam_vel * cam_losses["vel_2d_mse"]
+
                 terms["rotvelfoot_loss"] = self.lambda_cam_complement * rot_and_other_loss
                 loss = terms["cam_pos_loss"] + terms["rotvelfoot_loss"] + terms["cam_vel_loss"]
                 terms["loss"] = loss
