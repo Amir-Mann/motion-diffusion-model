@@ -131,6 +131,8 @@ class GaussianDiffusion:
         loss_type,
         rescale_timesteps=False,
         uniform_corruption=0.,
+        detach_after_iteration=False, # Only for iterative t values, where you train based on the model output
+        use_only_last_loss=False,
         lambda_rcxyz=0.,
         lambda_vel=0.,
         lambda_pose=1.,
@@ -216,6 +218,8 @@ class GaussianDiffusion:
         self.kinematic_tree_dests = []
 
         self.uniform_corruption = uniform_corruption
+        self.detach_after_iteration = detach_after_iteration
+        self.use_only_last_loss = use_only_last_loss
 
     def masked_l2(self, a, b, mask, scaled=True):
         # assuming a.shape == b.shape == bs, J, Jdim, seqlen
@@ -1280,204 +1284,213 @@ class GaussianDiffusion:
             ts_list = [t]
         elif len(t.shape) == 2:
             ts_list = [t[:, i] for i in range(0, t.shape[1])]
-        x_t = self.q_sample(x_start, t, noise=noise)
 
         terms = {}
 
-        if self.loss_type == LossType.KL or self.loss_type == LossType.RESCALED_KL:
-            terms["loss"] = self._vb_terms_bpd(
-                model=model,
-                x_start=x_start,
-                x_t=x_t,
-                t=t,
-                clip_denoised=False,
-                model_kwargs=model_kwargs,
-            )["output"]
-            if self.loss_type == LossType.RESCALED_KL:
-                terms["loss"] *= self.num_timesteps
-        elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE or self.loss_type == LossType.CAMERA_MSE:
-            
-            model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
-
-            if self.model_var_type in [
-                ModelVarType.LEARNED,
-                ModelVarType.LEARNED_RANGE,
-            ]:
-                B, C = x_t.shape[:2]
-                assert model_output.shape == (B, C * 2, *x_t.shape[2:])
-                model_output, model_var_values = th.split(model_output, C, dim=1)
-                # Learn the variance using the variational bound, but don't let
-                # it affect our mean prediction.
-                frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
-                terms["vb"] = self._vb_terms_bpd(
-                    model=lambda *args, r=frozen_out: r,
+        for i, t in enumerate(ts_list):
+            x_t = self.q_sample(x_start, t, noise=noise)
+            if self.loss_type == LossType.KL or self.loss_type == LossType.RESCALED_KL:
+                terms[str(i) + "_loss"] = self._vb_terms_bpd(
+                    model=model,
                     x_start=x_start,
                     x_t=x_t,
                     t=t,
                     clip_denoised=False,
+                    model_kwargs=model_kwargs,
                 )["output"]
-                if self.loss_type == LossType.RESCALED_MSE:
-                    # Divide by 1000 for equivalence with initial implementation.
-                    # Without a factor of 1/1000, the VB term hurts the MSE term.
-                    terms["vb"] *= self.num_timesteps / 1000.0
-
-            target = {
-                ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
-                    x_start=x_start, x_t=x_t, t=t
-                )[0],
-                ModelMeanType.START_X: x_start,
-                ModelMeanType.EPSILON: noise,
-            }[self.model_mean_type]
-            assert model_output.shape == target.shape == x_start.shape  # [bs, njoints, nfeats, nframes]
-
-            #AMIR MARKER
-            if self.loss_type == LossType.CAMERA_MSE:
-                if self.dataset_params_not_initialized:
-                    self.dataset_params_not_initialized = False
-                    assert hasattr(dataset, "t2m_dataset"), "CAMERA_MSE loss can currently be calculated only for t2m_dataset"
-                    for chain in t2m_kinematic_chain:
-                        self.kinematic_tree_sources.extend(chain[:-1])
-                        self.kinematic_tree_dests.extend(chain[1:])
-                    self.dataset_torch_std = torch.tensor(dataset.t2m_dataset.std).to(model_output.device)
-                    self.dataset_torch_mean = torch.tensor(dataset.t2m_dataset.mean).to(model_output.device)
+                if self.loss_type == LossType.RESCALED_KL:
+                    terms[str(i) + "_loss"] *= self.num_timesteps
+            elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE or self.loss_type == LossType.CAMERA_MSE:
                 
-                def get_xyz_hunanml(sample):
-                    # Recover XYZ *positions* from HumanML3D vector representation
-                    n_joints = 22 if sample.shape[1] == 263 else 21
-                    sample = sample.permute(0, 2, 3, 1) * self.dataset_torch_std + self.dataset_torch_mean
-                    sample = recover_from_ric(sample, n_joints)
-                    return sample.view(-1, *sample.shape[2:]).permute(0, 2, 3, 1)
-                target_xyz = get_xyz_hunanml(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
-                model_output_xyz = get_xyz_hunanml(model_output)  # [bs, nvertices, 3, nframes]
-                
-                motion_tensor = torch.cat((target_xyz, ), dim=1)
-                cam_hor_angles, cam_ver_angles, cam_distance, cam_shift = sample_random_camera(motion_tensor, distance_factor=2)
-                def calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift):
-                    #[batch_size, njoints, 2, nframes]
-                    target_xy, _ = perspective_projection_batch(target_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
-                    model_output_xy, distances = perspective_projection_batch(model_output_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
-                    def motion_factors(motion_2d):
-                        vel_2d = motion_2d[..., 1:] - motion_2d[..., :-1]
-                        join_vectors_2d = motion_2d[:, self.kinematic_tree_dests, ...] - motion_2d[:, self.kinematic_tree_sources, ...]
-                        joint_lengths_2d = torch.sqrt(torch.sum(join_vectors_2d ** 2, dim=2, keepdim=True))
-                        lengths_vel_2d = joint_lengths_2d[..., 1:] - joint_lengths_2d[..., :-1]
-                        rotaions_2d = torch.atan2(join_vectors_2d[..., 1, :], join_vectors_2d[..., 0, :]).unsqueeze(2)
-                        return {"pos_2d":motion_2d, "vel_2d":vel_2d, "joint_lengths_2d":joint_lengths_2d, "lengths_vel_2d":lengths_vel_2d, "rotaions_2d":rotaions_2d}
-                    target_factors_xy = motion_factors(target_xy)
-                    model_output_factors_xy = motion_factors(model_output_xy)
-                    batch_size_distances = distances.sum(dim=(1,2,3)).squeeze() / (distances.shape[1] * distances.shape[3]) 
-                    DISTANCE_THRESHOLD = 0.5
-                    terms["unstable_distances"] = (distances <= DISTANCE_THRESHOLD).sum().item()
-                    stable_distances = (distances > DISTANCE_THRESHOLD).expand(-1, -1, target_xy.shape[2], -1)
-                    def _where(a):
-                        return torch.where(stable_distances[:, -a.shape[1]:, :, -a.shape[3]:], a, torch.zeros_like(a))
-                    losses = {
-                        key + "_mse": self.masked_l2(_where(target_val), _where(model_output_factors_xy[key]), mask[... ,-target_val.shape[-1]:]) * batch_size_distances
-                        for key, target_val in target_factors_xy.items()
-                    }
-                    return losses
+                model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
+
+                if self.model_var_type in [
+                    ModelVarType.LEARNED,
+                    ModelVarType.LEARNED_RANGE,
+                ]:
+                    B, C = x_t.shape[:2]
+                    assert model_output.shape == (B, C * 2, *x_t.shape[2:])
+                    model_output, model_var_values = th.split(model_output, C, dim=1)
+                    # Learn the variance using the variational bound, but don't let
+                    # it affect our mean prediction.
+                    frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
+                    terms[str(i) + "_vb"] = self._vb_terms_bpd(
+                        model=lambda *args, r=frozen_out: r,
+                        x_start=x_start,
+                        x_t=x_t,
+                        t=t,
+                        clip_denoised=False,
+                    )["output"]
+                    if self.loss_type == LossType.RESCALED_MSE:
+                        # Divide by 1000 for equivalence with initial implementation.
+                        # Without a factor of 1/1000, the VB term hurts the MSE term.
+                        terms[str(i) + "_vb"] *= self.num_timesteps / 1000.0
+
+                target = {
+                    ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+                        x_start=x_start, x_t=x_t, t=t
+                    )[0],
+                    ModelMeanType.START_X: x_start,
+                    ModelMeanType.EPSILON: noise,
+                }[self.model_mean_type]
+                assert model_output.shape == target.shape == x_start.shape  # [bs, njoints, nfeats, nframes]
+
+                #AMIR MARKER
+                if self.loss_type == LossType.CAMERA_MSE:
+                    if self.dataset_params_not_initialized:
+                        self.dataset_params_not_initialized = False
+                        assert hasattr(dataset, "t2m_dataset"), "CAMERA_MSE loss can currently be calculated only for t2m_dataset"
+                        for chain in t2m_kinematic_chain:
+                            self.kinematic_tree_sources.extend(chain[:-1])
+                            self.kinematic_tree_dests.extend(chain[1:])
+                        self.dataset_torch_std = torch.tensor(dataset.t2m_dataset.std).to(model_output.device)
+                        self.dataset_torch_mean = torch.tensor(dataset.t2m_dataset.mean).to(model_output.device)
                     
-                cam_losses = calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
-                num_joints = 22
-                rot_and_other_loss = self.masked_l2(target[:, [0], ...], model_output[:, [0], ...], mask)
-                rot_and_other_loss += self.masked_l2(target[:, num_joints *3 + 1:, ...], model_output[:, num_joints *3 + 1:, ...], mask)
-                #mse_movement_loss = self.masked_l2(target[:, 1:num_joints *3 + 1, ...], model_output[:, 1:num_joints *3 + 1, ...], mask)
-                terms["rot_mse (not used)"] = self.masked_l2(target, model_output, mask) # mean_flat(rot_mse)
+                    def get_xyz_hunanml(sample):
+                        # Recover XYZ *positions* from HumanML3D vector representation
+                        n_joints = 22 if sample.shape[1] == 263 else 21
+                        sample = sample.permute(0, 2, 3, 1) * self.dataset_torch_std + self.dataset_torch_mean
+                        sample = recover_from_ric(sample, n_joints)
+                        return sample.view(-1, *sample.shape[2:]).permute(0, 2, 3, 1)
+                    target_xyz = get_xyz_hunanml(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
+                    model_output_xyz = get_xyz_hunanml(model_output)  # [bs, nvertices, 3, nframes]
+                    
+                    motion_tensor = torch.cat((target_xyz, ), dim=1)
+                    cam_hor_angles, cam_ver_angles, cam_distance, cam_shift = sample_random_camera(motion_tensor, distance_factor=2)
+                    def calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift):
+                        #[batch_size, njoints, 2, nframes]
+                        target_xy, _ = perspective_projection_batch(target_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
+                        model_output_xy, distances = perspective_projection_batch(model_output_xyz, cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
+                        def motion_factors(motion_2d):
+                            vel_2d = motion_2d[..., 1:] - motion_2d[..., :-1]
+                            join_vectors_2d = motion_2d[:, self.kinematic_tree_dests, ...] - motion_2d[:, self.kinematic_tree_sources, ...]
+                            joint_lengths_2d = torch.sqrt(torch.sum(join_vectors_2d ** 2, dim=2, keepdim=True))
+                            lengths_vel_2d = joint_lengths_2d[..., 1:] - joint_lengths_2d[..., :-1]
+                            rotaions_2d = torch.atan2(join_vectors_2d[..., 1, :], join_vectors_2d[..., 0, :]).unsqueeze(2)
+                            return {"pos_2d":motion_2d, "vel_2d":vel_2d, "joint_lengths_2d":joint_lengths_2d, "lengths_vel_2d":lengths_vel_2d, "rotaions_2d":rotaions_2d}
+                        target_factors_xy = motion_factors(target_xy)
+                        model_output_factors_xy = motion_factors(model_output_xy)
+                        batch_size_distances = distances.sum(dim=(1,2,3)).squeeze() / (distances.shape[1] * distances.shape[3]) 
+                        DISTANCE_THRESHOLD = 0.5
+                        terms[str(i) + "_unstable_distances"] = (distances <= DISTANCE_THRESHOLD).sum().item()
+                        stable_distances = (distances > DISTANCE_THRESHOLD).expand(-1, -1, target_xy.shape[2], -1)
+                        def _where(a):
+                            return torch.where(stable_distances[:, -a.shape[1]:, :, -a.shape[3]:], a, torch.zeros_like(a))
+                        losses = {
+                            key + "_mse": self.masked_l2(_where(target_val), _where(model_output_factors_xy[key]), mask[... ,-target_val.shape[-1]:]) * batch_size_distances
+                            for key, target_val in target_factors_xy.items()
+                        }
+                        return losses
+                        
+                    cam_losses = calc_cam_loss(cam_hor_angles, cam_ver_angles, cam_distance, cam_shift)
+                    num_joints = 22
+                    rot_and_other_loss = self.masked_l2(target[:, [0], ...], model_output[:, [0], ...], mask)
+                    rot_and_other_loss += self.masked_l2(target[:, num_joints *3 + 1:, ...], model_output[:, num_joints *3 + 1:, ...], mask)
+                    #mse_movement_loss = self.masked_l2(target[:, 1:num_joints *3 + 1, ...], model_output[:, 1:num_joints *3 + 1, ...], mask)
+                    terms[str(i) + "_rot_mse (not used)"] = self.masked_l2(target, model_output, mask) # mean_flat(rot_mse)
 
-                loss_max_value = 10
+                    loss_max_value = 10
 
-                terms["cam_pos_loss"] = self.lambda_cam * cam_losses["pos_2d_mse"]
-                terms["cam_vel_loss"] = self.lambda_cam * self.lambda_cam_vel * cam_losses["vel_2d_mse"]
+                    terms[str(i) + "_cam_pos_loss"] = self.lambda_cam * cam_losses["pos_2d_mse"]
+                    terms[str(i) + "_cam_vel_loss"] = self.lambda_cam * self.lambda_cam_vel * cam_losses["vel_2d_mse"]
 
-                terms["rotvelfoot_loss"] = self.lambda_cam_complement * rot_and_other_loss
-                loss = terms["cam_pos_loss"] + terms["rotvelfoot_loss"] + terms["cam_vel_loss"]
-                terms["loss"] = loss
-                
-                debugging = False
-                if (loss > loss_max_value).any() and debugging:  # Check if any value in terms["loss"] is greater than 10
-                    print("Got a large loss...")
-                    def truncate(tensor, factor=8):
-                        # Truncate all dimensions to a maximum size of factor. Useful for easy to read prints.
-                        slices = tuple(slice(0, min(factor, dim)) for dim in tensor.shape)
-                        return tensor[slices], [dim > factor for dim in tensor.shape]
-                    import pickle as p
-                    import datetime
-                    time_str = datetime.datetime.now().strftime('%Y.%m.%d_%H.%M')
-                    with open(f"/home/amir.mann/temp_debuging_losses/a{time_str}.pkl", "wb") as f:
-                        p.dump({
-                            "model_output": model_output[loss > loss_max_value].cpu(),
-                            "target": target[loss > loss_max_value].cpu(),
-                            "loss_explode": (loss > loss_max_value).cpu(),
-                            "target_xyz": target_xyz[loss > loss_max_value].cpu(),
-                            "model_output_xyz": model_output_xyz[loss > loss_max_value].cpu(),
-                            "cam_hor_angles": cam_hor_angles.cpu(),
-                            "cam_ver_angles": cam_ver_angles.cpu(),
-                            "cam_distance": cam_distance.cpu(),
-                            "cam_shift": cam_shift.cpu(),
-                            "target_xy": target_xy.cpu(),
-                            "model_output_xy": model_output_xy.cpu(),
-                            "mask": mask.cpu(),
-                            "distances": distances.cpu(),
-                            "target_distances": _.cpu(),
-                            "terms": terms["loss"].cpu(),
-                            "pure_loss": loss.cpu(),
-                            "rot_mse": self.masked_l2(target, model_output, mask).cpu(),
-                            "xyz_loss": self.masked_l2(target_xyz, model_output_xyz, mask).cpu(),
-                            "t": t.cpu(),
-                        }, f)
-                    exit()
+                    terms[str(i) + "_rotvelfoot_loss"] = self.lambda_cam_complement * rot_and_other_loss
+                    loss = terms[str(i) + "_cam_pos_loss"] + terms[str(i) + "_rotvelfoot_loss"] + terms[str(i) + "_cam_vel_loss"]
+                    terms[str(i) + "_loss"] = loss
+                    
+                    debugging = False
+                    if (loss > loss_max_value).any() and debugging:  # Check if any value in terms[str(i) + "_loss"] is greater than 10
+                        print("Got a large loss...")
+                        def truncate(tensor, factor=8):
+                            # Truncate all dimensions to a maximum size of factor. Useful for easy to read prints.
+                            slices = tuple(slice(0, min(factor, dim)) for dim in tensor.shape)
+                            return tensor[slices], [dim > factor for dim in tensor.shape]
+                        import pickle as p
+                        import datetime
+                        time_str = datetime.datetime.now().strftime('%Y.%m.%d_%H.%M')
+                        with open(f"/home/amir.mann/temp_debuging_losses/a{time_str}.pkl", "wb") as f:
+                            p.dump({
+                                "model_output": model_output[loss > loss_max_value].cpu(),
+                                "target": target[loss > loss_max_value].cpu(),
+                                "loss_explode": (loss > loss_max_value).cpu(),
+                                "target_xyz": target_xyz[loss > loss_max_value].cpu(),
+                                "model_output_xyz": model_output_xyz[loss > loss_max_value].cpu(),
+                                "cam_hor_angles": cam_hor_angles.cpu(),
+                                "cam_ver_angles": cam_ver_angles.cpu(),
+                                "cam_distance": cam_distance.cpu(),
+                                "cam_shift": cam_shift.cpu(),
+                                "target_xy": target_xy.cpu(),
+                                "model_output_xy": model_output_xy.cpu(),
+                                "mask": mask.cpu(),
+                                "distances": distances.cpu(),
+                                "target_distances": _.cpu(),
+                                "terms": terms[str(i) + "_loss"].cpu(),
+                                "pure_loss": loss.cpu(),
+                                "rot_mse": self.masked_l2(target, model_output, mask).cpu(),
+                                "xyz_loss": self.masked_l2(target_xyz, model_output_xyz, mask).cpu(),
+                                "t": t.cpu(),
+                            }, f)
+                        exit()
 
-                return terms
+                    x_start = model_output
+                    if self.detach_after_iteration:
+                        x_start = x_start.detach()
+                    continue
 
-            terms["rot_mse"] = self.masked_l2(target, model_output, mask) # mean_flat(rot_mse)
+                terms[str(i) + "_rot_mse"] = self.masked_l2(target, model_output, mask) # mean_flat(rot_mse)
 
-            target_xyz, model_output_xyz = None, None
+                target_xyz, model_output_xyz = None, None
 
-            if self.lambda_rcxyz > 0.:
-                target_xyz = get_xyz(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
-                model_output_xyz = get_xyz(model_output)  # [bs, nvertices, 3, nframes]
-                terms["rcxyz_mse"] = self.masked_l2(target_xyz, model_output_xyz, mask)  # mean_flat((target_xyz - model_output_xyz) ** 2)
+                if self.lambda_rcxyz > 0.:
+                    target_xyz = get_xyz(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
+                    model_output_xyz = get_xyz(model_output)  # [bs, nvertices, 3, nframes]
+                    terms[str(i) + "_rcxyz_mse"] = self.masked_l2(target_xyz, model_output_xyz, mask)  # mean_flat((target_xyz - model_output_xyz) ** 2)
 
-            if self.lambda_vel_rcxyz > 0.:
-                if self.data_rep == 'rot6d' and dataset.dataname in ['humanact12', 'uestc']:
-                    target_xyz = get_xyz(target) if target_xyz is None else target_xyz
-                    model_output_xyz = get_xyz(model_output) if model_output_xyz is None else model_output_xyz
-                    target_xyz_vel = (target_xyz[:, :, :, 1:] - target_xyz[:, :, :, :-1])
-                    model_output_xyz_vel = (model_output_xyz[:, :, :, 1:] - model_output_xyz[:, :, :, :-1])
-                    terms["vel_xyz_mse"] = self.masked_l2(target_xyz_vel, model_output_xyz_vel, mask[:, :, :, 1:])
+                if self.lambda_vel_rcxyz > 0.:
+                    if self.data_rep == 'rot6d' and dataset.dataname in ['humanact12', 'uestc']:
+                        target_xyz = get_xyz(target) if target_xyz is None else target_xyz
+                        model_output_xyz = get_xyz(model_output) if model_output_xyz is None else model_output_xyz
+                        target_xyz_vel = (target_xyz[:, :, :, 1:] - target_xyz[:, :, :, :-1])
+                        model_output_xyz_vel = (model_output_xyz[:, :, :, 1:] - model_output_xyz[:, :, :, :-1])
+                        terms[str(i) + "_vel_xyz_mse"] = self.masked_l2(target_xyz_vel, model_output_xyz_vel, mask[:, :, :, 1:])
 
-            if self.lambda_fc > 0.:
-                torch.autograd.set_detect_anomaly(True)
-                if self.data_rep == 'rot6d' and dataset.dataname in ['humanact12', 'uestc']:
-                    target_xyz = get_xyz(target) if target_xyz is None else target_xyz
-                    model_output_xyz = get_xyz(model_output) if model_output_xyz is None else model_output_xyz
-                    # 'L_Ankle',  # 7, 'R_Ankle',  # 8 , 'L_Foot',  # 10, 'R_Foot',  # 11
-                    l_ankle_idx, r_ankle_idx, l_foot_idx, r_foot_idx = 7, 8, 10, 11
-                    relevant_joints = [l_ankle_idx, l_foot_idx, r_ankle_idx, r_foot_idx]
-                    gt_joint_xyz = target_xyz[:, relevant_joints, :, :]  # [BatchSize, 4, 3, Frames]
-                    gt_joint_vel = torch.linalg.norm(gt_joint_xyz[:, :, :, 1:] - gt_joint_xyz[:, :, :, :-1], axis=2)  # [BatchSize, 4, Frames]
-                    fc_mask = torch.unsqueeze((gt_joint_vel <= 0.01), dim=2).repeat(1, 1, 3, 1)
-                    pred_joint_xyz = model_output_xyz[:, relevant_joints, :, :]  # [BatchSize, 4, 3, Frames]
-                    pred_vel = pred_joint_xyz[:, :, :, 1:] - pred_joint_xyz[:, :, :, :-1]
-                    pred_vel[~fc_mask] = 0
-                    terms["fc"] = self.masked_l2(pred_vel,
-                                                 torch.zeros(pred_vel.shape, device=pred_vel.device),
-                                                 mask[:, :, :, 1:])
-            if self.lambda_vel > 0.:
-                target_vel = (target[..., 1:] - target[..., :-1])
-                model_output_vel = (model_output[..., 1:] - model_output[..., :-1])
-                terms["vel_mse"] = self.masked_l2(target_vel[:, :-1, :, :], # Remove last joint, is the root location!
-                                                  model_output_vel[:, :-1, :, :],
-                                                  mask[:, :, :, 1:])  # mean_flat((target_vel - model_output_vel) ** 2)
+                if self.lambda_fc > 0.:
+                    torch.autograd.set_detect_anomaly(True)
+                    if self.data_rep == 'rot6d' and dataset.dataname in ['humanact12', 'uestc']:
+                        target_xyz = get_xyz(target) if target_xyz is None else target_xyz
+                        model_output_xyz = get_xyz(model_output) if model_output_xyz is None else model_output_xyz
+                        # 'L_Ankle',  # 7, 'R_Ankle',  # 8 , 'L_Foot',  # 10, 'R_Foot',  # 11
+                        l_ankle_idx, r_ankle_idx, l_foot_idx, r_foot_idx = 7, 8, 10, 11
+                        relevant_joints = [l_ankle_idx, l_foot_idx, r_ankle_idx, r_foot_idx]
+                        gt_joint_xyz = target_xyz[:, relevant_joints, :, :]  # [BatchSize, 4, 3, Frames]
+                        gt_joint_vel = torch.linalg.norm(gt_joint_xyz[:, :, :, 1:] - gt_joint_xyz[:, :, :, :-1], axis=2)  # [BatchSize, 4, Frames]
+                        fc_mask = torch.unsqueeze((gt_joint_vel <= 0.01), dim=2).repeat(1, 1, 3, 1)
+                        pred_joint_xyz = model_output_xyz[:, relevant_joints, :, :]  # [BatchSize, 4, 3, Frames]
+                        pred_vel = pred_joint_xyz[:, :, :, 1:] - pred_joint_xyz[:, :, :, :-1]
+                        pred_vel[~fc_mask] = 0
+                        terms[str(i) + "_fc"] = self.masked_l2(pred_vel,
+                                                    torch.zeros(pred_vel.shape, device=pred_vel.device),
+                                                    mask[:, :, :, 1:])
+                if self.lambda_vel > 0.:
+                    target_vel = (target[..., 1:] - target[..., :-1])
+                    model_output_vel = (model_output[..., 1:] - model_output[..., :-1])
+                    terms[str(i) + "_vel_mse"] = self.masked_l2(target_vel[:, :-1, :, :], # Remove last joint, is the root location!
+                                                    model_output_vel[:, :-1, :, :],
+                                                    mask[:, :, :, 1:])  # mean_flat((target_vel - model_output_vel) ** 2)
 
-            terms["loss"] = terms["rot_mse"] + terms.get('vb', 0.) +\
-                            (self.lambda_vel * terms.get('vel_mse', 0.)) +\
-                            (self.lambda_rcxyz * terms.get('rcxyz_mse', 0.)) + \
-                            (self.lambda_fc * terms.get('fc', 0.))
+                terms[str(i) + "_loss"] = terms[str(i) + "_rot_mse"] + terms.get('vb', 0.) +\
+                                (self.lambda_vel * terms.get('vel_mse', 0.)) +\
+                                (self.lambda_rcxyz * terms.get('rcxyz_mse', 0.)) + \
+                                (self.lambda_fc * terms.get('fc', 0.))
 
+            else:
+                raise NotImplementedError(self.loss_type)
+        if self.use_only_last_loss:
+            terms["loss"] = terms[str(i) + "_loss"]
         else:
-            raise NotImplementedError(self.loss_type)
-
+            terms["loss"] = terms["0_loss"]
+            for i in range(1, len(ts_list)):
+                terms["loss"] += terms[str(i) + "_loss"]
         return terms
 
     def fc_loss_rot_repr(self, gt_xyz, pred_xyz, mask):
