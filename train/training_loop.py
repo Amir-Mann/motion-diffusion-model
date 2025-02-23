@@ -92,8 +92,8 @@ class TrainLoop:
         if torch.cuda.is_available() and dist_util.dev() != 'cpu':
             self.device = torch.device(dist_util.dev())
 
-        self.schedule_sampler_type = 'uniform'
-        self.schedule_sampler = create_named_schedule_sampler(self.schedule_sampler_type, diffusion)
+        self.schedule_sampler_type = 'uniform' if args.t_star_method == "None" else "t_star"
+        self.schedule_sampler = create_named_schedule_sampler(self.schedule_sampler_type, diffusion, args)
         self.eval_wrapper, self.eval_data, self.eval_gt_data = None, None, None
         if args.dataset in ['kit', 'humanml'] and args.eval_during_training:
             mm_num_samples = 0  # mm is super slow hence we won't run it during training

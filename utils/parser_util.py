@@ -72,6 +72,15 @@ def add_diffusion_options(parser):
     group.add_argument("--sigma_small", default=True, type=bool, help="Use smaller sigma values.")
     group.add_argument("--sample_2d", action='store_true',
                        help="Train based on 2d projection of the data instead of the original formulation.")
+    group.add_argument("--t_star_method", default='None', choices=['None', 'curriculum', 'Last_step_only', 'Every_step', 'Buckets', 'Buckets_all_steps'], type=str,
+                       help="For training using a special method for the last t_star steps. Must be None or used with a valid value of t_star")
+    group.add_argument("--t_star", default=None, type=int,
+                       help="t_star, the value of minimal value to use regular training for, from values lower then t* will use a method using the t_star_method.")
+    group.add_argument("--t_star_arg", default=None, type=int,
+                       help="An argument for the t_star sampler. num buckets for bucket sampling.")
+    group.add_argument("--corrupt_teacher", default="GT", choices=['GT', 'Uniform'], type=str,
+                       help="Corrupt teacher to use for training source data to mix with noise (not for supervision).")
+    group.add_argument("--batch_size_star", default=64, type=int, help="Batch size during training for batches with t values under t*.")
 
 
 def add_model_options(parser):
@@ -98,6 +107,7 @@ def add_model_options(parser):
     group.add_argument("--unconstrained", action='store_true',
                        help="Model is trained unconditionally. That is, it is constrained by neither text nor action. "
                             "Currently tested on HumanAct12 only.")
+
 
 
 
