@@ -89,5 +89,6 @@ def create_gaussian_diffusion(args):
         lambda_fc=args.lambda_fc,
         lambda_cam=args.lambda_cam,
         lambda_cam_vel=args.lambda_cam_vel,
-        lambda_cam_complement=args.lambda_cam_complement
+        lambda_cam_complement=args.lambda_cam_complement,
+        uniform_corruption=args.corrupt_uniform_teacher_range
     )

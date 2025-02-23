@@ -130,6 +130,7 @@ class GaussianDiffusion:
         model_var_type,
         loss_type,
         rescale_timesteps=False,
+        uniform_corruption=0.,
         lambda_rcxyz=0.,
         lambda_vel=0.,
         lambda_pose=1.,
@@ -213,6 +214,8 @@ class GaussianDiffusion:
         self.dataset_torch_mean = None
         self.kinematic_tree_sources = []
         self.kinematic_tree_dests = []
+
+        self.uniform_corruption = uniform_corruption
 
     def masked_l2(self, a, b, mask, scaled=True):
         # assuming a.shape == b.shape == bs, J, Jdim, seqlen
@@ -1269,6 +1272,14 @@ class GaussianDiffusion:
             model_kwargs = {}
         if noise is None:
             noise = th.randn_like(x_start)
+        if self.uniform_corruption:
+            corruption = (2 * self.uniform_corruption * th.rand_like(x_start)) - self.uniform_corruption
+            x_start += corruption
+
+        if len(t.shape) == 1:
+            ts_list = [t]
+        elif len(t.shape) == 2:
+            ts_list = [t[:, i] for i in range(0, t.shape[1])]
         x_t = self.q_sample(x_start, t, noise=noise)
 
         terms = {}
@@ -1285,6 +1296,7 @@ class GaussianDiffusion:
             if self.loss_type == LossType.RESCALED_KL:
                 terms["loss"] *= self.num_timesteps
         elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE or self.loss_type == LossType.CAMERA_MSE:
+            
             model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
 
             if self.model_var_type in [

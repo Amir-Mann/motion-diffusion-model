@@ -164,8 +164,8 @@ def sample_buckets(sampler, batch_size, device):
     buckets = sampler.arg
     assert buckets is not None and buckets < sampler.t_star, "When using a bucket t_star sampler must provide t_star_arg as num buckets"
 
-    # Compute bucket size, rounding up so the last bucket is properly placed
-    bucket_size = (sampler.t_star) // (buckets - 1) 
+    # Compute bucket size, rounding up to the smallest integer which makes sure there lowest value the first bucket can have is t*
+    bucket_size = ((sampler.t_star + buckets - 3)) // (buckets - 1)  # Equivalent to ceil((t_star-1) / (buckets-1))
 
     # Generate random indices within each bucket
     bucket_offsets = th.arange((buckets - 1) * bucket_size, -1, -bucket_size, device=device)

@@ -78,8 +78,8 @@ def add_diffusion_options(parser):
                        help="t_star, the value of minimal value to use regular training for, from values lower then t* will use a method using the t_star_method.")
     group.add_argument("--t_star_arg", default=None, type=int,
                        help="An argument for the t_star sampler. num buckets for bucket sampling.")
-    group.add_argument("--corrupt_teacher", default="GT", choices=['GT', 'Uniform'], type=str,
-                       help="Corrupt teacher to use for training source data to mix with noise (not for supervision).")
+    group.add_argument("--corrupt_uniform_teacher_range", default=0.0, type=float,
+                       help="Corrupt teacher to use for training source data to mix with noise. if v then will add unifotm corruption from [-v, v].")
     group.add_argument("--batch_size_star", default=64, type=int, help="Batch size during training for batches with t values under t*.")
 
 
