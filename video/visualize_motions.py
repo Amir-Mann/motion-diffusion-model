@@ -6,10 +6,12 @@ import pickle
 import argparse
 import datetime
 import numpy as np
+from dataset_info import dataset_torch_std, dataset_torch_mean
 
 sys.path.append('/home/amir.mann/MDM/')
 import data_loaders.humanml.utils.paramUtil as paramUtil
 from data_loaders.humanml.utils.plot_script import plot_3d_motion
+from data_loaders.humanml.scripts.motion_process import recover_from_ric
 from utils.math_utils import perspective_projection_batch, compute_into_camera_shift_from_angle
 
 
@@ -78,13 +80,16 @@ def parse_pickle(data, keys):
     #parsed_data = parsed_data * data["distances"][evaled_key]
     if isinstance(parsed_data, torch.Tensor):
         if len(parsed_data.shape) > 3:
-            raise RuntimeError("Data is of shape larger then 3, maybe use some index.")
+            raise RuntimeError(f"Data is of shape {parsed_data.shape} larger then 3, maybe use some index.")
         parsed_data = parsed_data.permute(2, 0 ,1)
         if parsed_data.shape[-1] == 2:
             nframes, njoints, _ = parsed_data.shape
             z_dim = torch.zeros(nframes, njoints, 1, device=parsed_data.device)      
             parsed_data = torch.cat((parsed_data, z_dim), dim=2)
-        parsed_data = parsed_data.detach().numpy()
+        try: 
+            parsed_data = parsed_data.detach().numpy()
+        except:
+            parsed_data = parsed_data.cpu().numpy()
     return parsed_data, caption
 
 def get_data(args, sample):
@@ -99,6 +104,19 @@ def get_data(args, sample):
                 pickle_data = pickle.load(f)
                 data, cap = parse_pickle(pickle_data.copy(), args.pickle_keys)
                 caption += cap
+                if args.from_humanml:
+                    data = torch.from_numpy(data).unsqueeze(0)
+                    n_joints = 22 if data.shape[2] == 263 else 21
+                    print(f"data.shape={data.shape}")
+                    norm_data = data.permute(0, 3, 1, 2) * dataset_torch_std + dataset_torch_mean
+                    print(f"norm_data.shape={norm_data.shape}")
+                    xyz_data = recover_from_ric(norm_data, n_joints)
+                    xyz_data = xyz_data.view(-1, *xyz_data.shape[2:])
+                    #zeros = torch.zeros(1, 196, 1, 3)  # Column of zeros
+                    #xyz_data_padded = torch.cat([xyz_data, zeros], dim=2)
+                    print(f"xyz_data.shape={xyz_data.shape}")
+                    data = xyz_data.squeeze(dim=0).numpy() # <<<ls
+                print(f"data.shape={data.shape}")
                 if args.other_pickle_keys:
                     other_data, cap = parse_pickle(pickle_data.copy(), args.other_pickle_keys)
                     caption += " other:" + cap
@@ -221,6 +239,7 @@ def get_argparse_arguments():
                        help="The vertical angle lower bound to sample from.")
     group.add_argument("--distance", default=2.0, type=float,
                        help="Distance between camera and the closest point in the motion on the xz plain")
+    group.add_argument("--from_humanml", action='store_true', help="From humanML data representation.")
 
     group.add_argument("--dataset", default='humanml', choices=['humanml', 'kit', 'humanact12', 'uestc'], type=str,
                        help="Dataset name (choose from list).")

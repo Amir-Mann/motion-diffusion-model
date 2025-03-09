@@ -33,7 +33,7 @@ def main():
     dist_util.setup_dist(args.device)
 
     print("creating data loader...")
-    data = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=args.num_frames, split=args.train_split)
+    data = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=args.num_frames, num_workers=args.num_workers, split=args.train_split)
     other_data = None
     if isinstance(data, list):
         data, other_data= data[0], data[1]

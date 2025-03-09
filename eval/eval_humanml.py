@@ -142,7 +142,16 @@ def evaluation(eval_wrapper, gt_loader, eval_motion_loaders, log_file, replicati
                                    'FID': OrderedDict({}),
                                    'Diversity': OrderedDict({}),
                                    'MultiModality': OrderedDict({})})
+        start_time = time.time()
         for replication in range(replication_times):
+            if replication != 0:
+                ran_for = time.time() - start_time
+                ran_for_min = int(ran_for // 60)
+                ran_for_sec = int(ran_for % 60)
+                left = ran_for * (replication_times - replication) / replication
+                left_min = int(left // 60)
+                left_sec = int(ran_for % 60)
+                print(f"Ran for {ran_for_min}:{ran_for_sec} still about {left}:{left_sec} left.")
             motion_loaders = {}
             mm_motion_loaders = {}
             motion_loaders['ground truth'] = gt_loader

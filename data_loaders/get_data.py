@@ -41,7 +41,7 @@ def get_dataset(name, num_frames, split='train', hml_mode='train'):
     return dataset
 
 
-def get_dataset_loader(name, batch_size, num_frames, split='train', hml_mode='train'):
+def get_dataset_loader(name, batch_size, num_frames, num_workers=0, split='train', hml_mode='train'):
     if "," in split:
         datasets = [get_dataset(name, num_frames, split=subsplit, hml_mode=hml_mode) for subsplit in split.split(",")]
     else:
@@ -51,7 +51,7 @@ def get_dataset_loader(name, batch_size, num_frames, split='train', hml_mode='tr
     loaders = [
         DataLoader(
             dataset, batch_size=batch_size, shuffle=True,
-            num_workers=0, drop_last=True, collate_fn=collate
+            num_workers=num_workers, drop_last=True, collate_fn=collate
         ) for dataset in datasets
     ]
 

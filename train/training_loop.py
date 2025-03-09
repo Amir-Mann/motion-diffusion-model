@@ -49,11 +49,11 @@ class TrainLoop:
         self.weight_decay = args.weight_decay
         self.lr_anneal_steps = args.lr_anneal_steps
 
-        self.step = 1
+        self.step = self.batch_size // 64
         self.resume_step = 0
         self.global_batch = self.batch_size # * dist.get_world_size()
         self.num_steps = args.num_steps
-        self.num_epochs = self.num_steps // len(self.data) + 1
+        self.num_epochs = (self.num_steps * 64) // (len(self.data) * self.batch_size) + 1
 
         self.sync_cuda = torch.cuda.is_available()
 
@@ -187,7 +187,9 @@ class TrainLoop:
                     # Run for a finite amount of time in integration tests.
                     if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                         return
-                self.step += 1
+                self.step += self.batch_size / 64.0
+                if self.step == int(self.step):
+                    self.step = int(self.step)
             if not (not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps):
                 break
         
@@ -361,6 +363,8 @@ def find_resume_checkpoint():
 
 
 def log_loss_dict(diffusion, ts, losses, log_quartiles=4):
+    if len(ts.shape) > 1:
+        ts = ts[:, 0]
     for key, values in losses.items():
         logger.logkv_mean(key, values.mean().detach().cpu().item())
         # Log the quantiles (four quartiles, in particular).

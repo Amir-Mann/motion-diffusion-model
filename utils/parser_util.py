@@ -60,7 +60,8 @@ def add_base_options(parser):
     group.add_argument("--cuda", default=True, type=bool, help="Use cuda device, otherwise use CPU.")
     group.add_argument("--device", default=0, type=int, help="Device id to use.")
     group.add_argument("--seed", default=10, type=int, help="For fixing random seed.")
-    group.add_argument("--batch_size", default=64, type=int, help="Batch size during training.")
+    group.add_argument("--batch_size", default=128, type=int, help="Batch size during training.")
+    group.add_argument("--num_workers", default=0, type=int, help="Amount of workers for data loaders.")
 
 
 def add_diffusion_options(parser):
@@ -72,13 +73,14 @@ def add_diffusion_options(parser):
     group.add_argument("--sigma_small", default=True, type=bool, help="Use smaller sigma values.")
     group.add_argument("--sample_2d", action='store_true',
                        help="Train based on 2d projection of the data instead of the original formulation.")
-    group.add_argument("--t_star_method", default='None', choices=['None', 'curriculum', 'Last_step_only', 'Every_step', 'Buckets', 'Buckets_all_steps'], type=str,
+    iterative_tstar_methods = [f'iterative_b{b}_e{e}_d{d}' for b in [0, 1] for e in [0, 1] for d in[0, 1]]
+    group.add_argument("--t_star_method", default='None', choices=['None', 'curriculum'] + iterative_tstar_methods, type=str,
                        help="For training using a special method for the last t_star steps. Must be None or used with a valid value of t_star")
     group.add_argument("--t_star", default=None, type=int,
                        help="t_star, the value of minimal value to use regular training for, from values lower then t* will use a method using the t_star_method.")
     group.add_argument("--t_star_arg", default=None, type=int,
                        help="An argument for the t_star sampler. num buckets for bucket sampling.")
-    group.add_argument("--corrupt_uniform_teacher_range", default=0.0, type=float,
+    group.add_argument("--corrupt_teacher", default=0.0, type=float,
                        help="Corrupt teacher to use for training source data to mix with noise. if v then will add unifotm corruption from [-v, v].")
     group.add_argument("--batch_size_star", default=64, type=int, help="Batch size during training for batches with t values under t*.")
 

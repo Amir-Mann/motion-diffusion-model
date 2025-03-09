@@ -17,7 +17,9 @@ def create_named_schedule_sampler(name, diffusion, args):
     elif name == "loss-second-moment":
         return LossSecondMomentResampler(diffusion)
     elif name == "t_star":
-        return TStarUniformSampler(name, diffusion, args)
+        if args.t_star_method == "curriculum":
+            return CurriculumTStarSampler(diffusion, args)
+        return TStarUniformSampler(diffusion, args)
     else:
         raise NotImplementedError(f"unknown schedule sampler: {name}")
 
@@ -156,9 +158,9 @@ class LossSecondMomentResampler(LossAwareSampler):
         return (self._loss_counts == self.history_per_term).all()
 
 
-def sample_all_steps(sampler, batch_size, device):
-    weights = th.tensor(1).float().expand(batch_size)
-    return th.arange(sampler.t_star, 0, -1, device=device).expand(batch_size, -1), weights
+def sample_all_steps(sampler, batch_size, device, target=0):
+    weights = th.tensor(1, device=device).float().expand(batch_size)
+    return th.arange(sampler.t_star, target, -1, device=device).expand(batch_size, -1), weights
 
 def sample_buckets(sampler, batch_size, device):
     buckets = sampler.arg
@@ -171,7 +173,7 @@ def sample_buckets(sampler, batch_size, device):
     bucket_offsets = th.arange((buckets - 1) * bucket_size, -1, -bucket_size, device=device)
     random_offsets = th.randint(1, bucket_size + 1, (batch_size, buckets), device=device)
     indices = bucket_offsets.expand(batch_size, -1) + random_offsets
-    weights = th.tensor(1).float().expand(batch_size)
+    weights = th.tensor(1, device=device).float().expand(batch_size)
 
     return indices, weights
 
@@ -181,22 +183,15 @@ class TStarUniformSampler(ScheduleSampler):
         self.diffusion = diffusion
         self._weights = np.ones([diffusion.num_timesteps])
         self.T = self.diffusion.num_timesteps
-        assert args.t_star is not None and args.t_star > 0, "When using a t* method which is none 'None' --t_star must be a positive integer."
+        assert args.t_star is not None and args.t_star > 0, "When using a t* method which is not 'None' --t_star must be a positive integer."
         assert args.t_star < self.T, "t* must be less then T (the num_timesteps for the diffusion)"
         self.t_star = args.t_star
-        bs = args.batch_size
-        bs_star = args.batch_size_star
         self.arg = args.t_star_arg
         
         t_star_frac = (self.T - self.t_star) / self.t_star
-        self.probability_of_t_star_batch = bs / (bs + bs_star * t_star_frac)
+        self.probability_of_t_star_batch = 1 / (1 + t_star_frac)
         self.method = args.t_star_method
-        self.sample_methods = {
-            'Last_step_only': sample_all_steps, 
-            'Every_step': sample_all_steps, 
-            'Buckets': sample_buckets, 
-            'Buckets_all_steps': sample_buckets
-        }
+        self.sample_method = sample_buckets if "_b1" in args.t_star_method else sample_all_steps
 
     def weights(self):
         return self._weights
@@ -211,11 +206,57 @@ class TStarUniformSampler(ScheduleSampler):
                  - timesteps: a tensor of timestep indices.
                  - weights: a tensor of weights to scale the resulting losses.
         """
-        if np.random() > self.probability_of_t_star_batch:
+        if np.random.random() > self.probability_of_t_star_batch:
             w = th.ones([self.T - self.t_star], device=device)
             p = w / th.sum(w)
             indices = th.multinomial(p, batch_size, replacement=True).long()
-            weights = (1 / (len(p) * p[indices])).float()
+            weights = 1 / (len(p) * p[indices]).float()
         else:
-            indices, weights = self.sample_methods[self.method](self, batch_size, device)
+            indices, weights = self.sample_method(self, batch_size, device)
+        return indices, weights
+
+class CurriculumTStarSampler(ScheduleSampler):
+    def __init__(self, diffusion, args):
+        self.diffusion = diffusion
+        self._weights = np.ones([diffusion.num_timesteps])
+        self.T = self.diffusion.num_timesteps
+        assert args.t_star is not None and args.t_star > 0, "When using a t* method which is not 'None' --t_star must be a positive integer."
+        assert args.t_star < self.T, "t* must be less then T (the num_timesteps for the diffusion)"
+        self.t_star = args.t_star
+        bs = args.batch_size
+        bs_star = args.batch_size_star
+        self.num_steps_for_each_t = args.t_star_arg
+        self.num_steps_at_curr_t = 0
+        self.curr_t = args.t_star - 1
+        
+        t_star_frac = (self.T - self.t_star) / self.t_star
+        self.probability_of_t_star_batch = 1 / (1 + 1 * t_star_frac)
+        self.other_count = 0
+        self.method = args.t_star_method
+
+    def weights(self):
+        return self._weights
+
+    def sample(self, batch_size, device):
+        """
+        Importance-sample timesteps for a batch.
+
+        :param batch_size: the number of timesteps.
+        :param device: the torch device to save to.
+        :return: a tuple (timesteps, weights):
+                 - timesteps: a tensor of timestep indices.
+                 - weights: a tensor of weights to scale the resulting losses.
+        """
+        if np.random.random() > self.probability_of_t_star_batch:
+            w = th.ones([self.T - self.t_star], device=device)
+            p = w / th.sum(w)
+            indices = th.multinomial(p, batch_size, replacement=True).long()
+            weights = 1 / (len(p) * p[indices]).float()
+            self.other_count += 1
+        else:
+            if self.num_steps_at_curr_t >= self.num_steps_for_each_t:
+                self.num_steps_at_curr_t = 0
+                self.curr_t = max(0, self.curr_t - 1)
+            indices, weights = sample_all_steps(self, batch_size, device, target=self.curr_t)
+            self.num_steps_at_curr_t += 1
         return indices, weights

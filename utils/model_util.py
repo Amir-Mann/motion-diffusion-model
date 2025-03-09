@@ -66,7 +66,8 @@ def create_gaussian_diffusion(args):
 
     if not timestep_respacing:
         timestep_respacing = [steps]
-
+    detach_after_iteration = "_d1" in args.t_star_method
+    use_only_last_loss = "_e1" not in args.t_star_method or args.t_star_method == "curriculum"
     return SpacedDiffusion(
         use_timesteps=space_timesteps(steps, timestep_respacing),
         betas=betas,
@@ -90,6 +91,7 @@ def create_gaussian_diffusion(args):
         lambda_cam=args.lambda_cam,
         lambda_cam_vel=args.lambda_cam_vel,
         lambda_cam_complement=args.lambda_cam_complement,
-        uniform_corruption=args.corrupt_uniform_teacher_range
-        detach_after_iteration=args.detach_after_iteration
+        uniform_corruption=args.corrupt_teacher,
+        detach_after_iteration=detach_after_iteration,
+        use_only_last_loss=use_only_last_loss
     )
