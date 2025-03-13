@@ -150,7 +150,7 @@ class TrainLoop:
             self.opt.load_state_dict(state_dict)
 
     def run_loop(self):
-
+        saved_last_time = False
         for epoch in tqdm(range(self.num_epochs)):
             #print(f'Starting epoch {epoch} / {self.num_epochs}')
             if self.other_data is None:
@@ -158,6 +158,7 @@ class TrainLoop:
             else:
                 generator = AlternatingIterable(self.data, self.other_data)
             for motion, cond in generator:
+                saved_last_time = False
                 if not (not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps):
                     break
 
@@ -178,7 +179,9 @@ class TrainLoop:
                         else:
                             self.train_platform.report_scalar(name=k, value=v, iteration=self.step, group_name='Loss')
 
-                if self.step % self.save_interval == 0:
+                saved_last_time = False
+                if self.step % self.save_interval == 0 and self.step == int(self.step):
+                    saved_last_time = True
                     self.save()
                     self.model.eval()
                     self.evaluate()
@@ -196,8 +199,9 @@ class TrainLoop:
         print("unstable_distances_times", self.unstable_distances_times)
         print("unstable_distances_count", self.unstable_distances_count)
         # Save the last checkpoint if it wasn't already saved.
-        if (self.step - 1) % self.save_interval != 0:
+        if not saved_last_time:
             self.save()
+            self.model.eval()
             self.evaluate()
 
     def evaluate(self):
@@ -206,7 +210,7 @@ class TrainLoop:
         start_eval = time.time()
         if self.eval_wrapper is not None:
             print('Running evaluation loop: [Should take about 90 min]')
-            log_file = os.path.join(self.save_dir, f'eval_humanml_{(self.step + self.resume_step):09d}.log')
+            log_file = os.path.join(self.save_dir, f'eval_humanml_{int(self.step + self.resume_step):09d}.log')
             diversity_times = 300
             mm_num_times = 0  # mm is super slow hence we won't run it during training
             eval_dict = eval_humanml.evaluation(
@@ -217,10 +221,10 @@ class TrainLoop:
                 if k.startswith('R_precision'):
                     for i in range(len(v)):
                         self.train_platform.report_scalar(name=f'top{i + 1}_' + k, value=v[i],
-                                                          iteration=self.step + self.resume_step,
+                                                          iteration=int(self.step + self.resume_step),
                                                           group_name='Eval')
                 else:
-                    self.train_platform.report_scalar(name=k, value=v, iteration=self.step + self.resume_step,
+                    self.train_platform.report_scalar(name=k, value=v, iteration=int(self.step + self.resume_step),
                                                       group_name='Eval')
 
         elif self.dataset in ['humanact12', 'uestc']:
@@ -250,10 +254,14 @@ class TrainLoop:
         self.log_step()
 
     def forward_backward(self, batch, cond):
+        
+        t, weights = self.schedule_sampler.sample(batch.shape[0], dist_util.dev())
+            
         if self.other_data and self.optimize_other_now:
-            self.other_mp_trainer.zero_grad()
+            zero_grad = self.other_mp_trainer.zero_grad
         else:
-            self.mp_trainer.zero_grad()
+            zero_grad = self.mp_trainer.zero_grad
+        zero_grad()
         for i in range(0, batch.shape[0], self.microbatch):
             # Eliminates the microbatch feature
             assert i == 0
@@ -261,7 +269,6 @@ class TrainLoop:
             micro = batch
             micro_cond = cond
             last_batch = (i + self.microbatch) >= batch.shape[0]
-            t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
 
             compute_losses = functools.partial(
                 self.diffusion.training_losses,
@@ -269,7 +276,8 @@ class TrainLoop:
                 micro,  # [bs, ch, image_size, image_size]
                 t,  # [bs](int) sampled timesteps
                 model_kwargs=micro_cond,
-                dataset=self.data.dataset
+                dataset=self.data.dataset,
+                zero_grad=zero_grad
             )
 
             if last_batch or not self.use_ddp:
@@ -305,12 +313,12 @@ class TrainLoop:
             param_group["lr"] = lr
 
     def log_step(self):
-        logger.logkv("step", self.step + self.resume_step)
-        logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
+        logger.logkv("step", int(self.step + self.resume_step))
+        logger.logkv("samples", (int(self.step + self.resume_step) + 1) * self.global_batch)
 
 
     def ckpt_file_name(self):
-        return f"model{(self.step+self.resume_step):09d}.pt"
+        return f"model{int(self.step+self.resume_step):09d}.pt"
 
 
     def save(self):
@@ -330,7 +338,7 @@ class TrainLoop:
 
         save_checkpoint(self.mp_trainer.master_params)
 
-        opt_cp_path = os.path.join(self.save_dir, f"opt{(self.step+self.resume_step):09d}.pt")
+        opt_cp_path = os.path.join(self.save_dir, f"opt{int(self.step+self.resume_step):09d}.pt")
         with open(opt_cp_path, "wb",) as f:
             torch.save(self.opt.state_dict(), f)
 

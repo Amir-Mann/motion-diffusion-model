@@ -102,6 +102,7 @@ def get_data(args, sample):
                 data = np.load(f)
             elif sample[-len(".pkl"):] == ".pkl":
                 pickle_data = pickle.load(f)
+                print(pickle_data.keys())
                 data, cap = parse_pickle(pickle_data.copy(), args.pickle_keys)
                 caption += cap
                 if args.from_humanml:
@@ -130,6 +131,7 @@ def get_data(args, sample):
             caption = f.read()
     else:
         print(f"Invalid sample {sample}, which is nither a path to a file nor an integer.")
+        exit()
         data = np.array([[[[]]]])
         caption = f"No data found for sample {sample}"
     print(data.shape, other_data.shape if other_data is not None else "No other data")

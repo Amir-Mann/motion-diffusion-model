@@ -19,7 +19,10 @@ def create_named_schedule_sampler(name, diffusion, args):
     elif name == "t_star":
         if args.t_star_method == "curriculum":
             return CurriculumTStarSampler(diffusion, args)
-        return TStarUniformSampler(diffusion, args)
+        elif args.t_star_method == "recursive":
+            args.t_star_arg = 1
+            return TStarUniformSampler(diffusion, args, buckets=True)
+        return TStarUniformSampler(diffusion, args, buckets="_b1" in args.t_star_method)
     else:
         raise NotImplementedError(f"unknown schedule sampler: {name}")
 
@@ -157,21 +160,30 @@ class LossSecondMomentResampler(LossAwareSampler):
     def _warmed_up(self):
         return (self._loss_counts == self.history_per_term).all()
 
+def sample_above_t_star(sampler, batch_size, device):
+    w = th.cat([th.zeros((sampler.t_star, ), device=device), th.ones((sampler.T - sampler.t_star,), device=device)], dim=0)
+    p = w / th.sum(w)
+    indices = th.multinomial(p, batch_size, replacement=True).long()
+    weights = th.ones((batch_size,), device=device)
+    return indices, weights
 
 def sample_all_steps(sampler, batch_size, device, target=0):
     weights = th.tensor(1, device=device).float().expand(batch_size)
-    return th.arange(sampler.t_star, target, -1, device=device).expand(batch_size, -1), weights
+    return th.arange(sampler.t_star - 1, target - 1, -1, device=device).expand(batch_size, -1), weights
 
 def sample_buckets(sampler, batch_size, device):
     buckets = sampler.arg
     assert buckets is not None and buckets < sampler.t_star, "When using a bucket t_star sampler must provide t_star_arg as num buckets"
 
     # Compute bucket size, rounding up to the smallest integer which makes sure there lowest value the first bucket can have is t*
-    bucket_size = ((sampler.t_star + buckets - 3)) // (buckets - 1)  # Equivalent to ceil((t_star-1) / (buckets-1))
+    if buckets > 1:
+        bucket_size = ((sampler.t_star + buckets - 3)) // (buckets - 1)  # Equivalent to ceil((t_star-1) / (buckets-1))
+    else:
+        bucket_size = sampler.t_star
 
     # Generate random indices within each bucket
     bucket_offsets = th.arange((buckets - 1) * bucket_size, -1, -bucket_size, device=device)
-    random_offsets = th.randint(1, bucket_size + 1, (batch_size, buckets), device=device)
+    random_offsets = th.randint(0, bucket_size, (batch_size, buckets), device=device)
     indices = bucket_offsets.expand(batch_size, -1) + random_offsets
     weights = th.tensor(1, device=device).float().expand(batch_size)
 
@@ -179,7 +191,7 @@ def sample_buckets(sampler, batch_size, device):
 
 
 class TStarUniformSampler(ScheduleSampler):
-    def __init__(self, diffusion, args):
+    def __init__(self, diffusion, args, buckets):
         self.diffusion = diffusion
         self._weights = np.ones([diffusion.num_timesteps])
         self.T = self.diffusion.num_timesteps
@@ -191,7 +203,7 @@ class TStarUniformSampler(ScheduleSampler):
         t_star_frac = (self.T - self.t_star) / self.t_star
         self.probability_of_t_star_batch = 1 / (1 + t_star_frac)
         self.method = args.t_star_method
-        self.sample_method = sample_buckets if "_b1" in args.t_star_method else sample_all_steps
+        self.sample_method = sample_buckets if buckets else sample_all_steps
 
     def weights(self):
         return self._weights
@@ -207,10 +219,7 @@ class TStarUniformSampler(ScheduleSampler):
                  - weights: a tensor of weights to scale the resulting losses.
         """
         if np.random.random() > self.probability_of_t_star_batch:
-            w = th.ones([self.T - self.t_star], device=device)
-            p = w / th.sum(w)
-            indices = th.multinomial(p, batch_size, replacement=True).long()
-            weights = 1 / (len(p) * p[indices]).float()
+            indices, weights = sample_above_t_star(self, batch_size, device)
         else:
             indices, weights = self.sample_method(self, batch_size, device)
         return indices, weights
@@ -223,15 +232,12 @@ class CurriculumTStarSampler(ScheduleSampler):
         assert args.t_star is not None and args.t_star > 0, "When using a t* method which is not 'None' --t_star must be a positive integer."
         assert args.t_star < self.T, "t* must be less then T (the num_timesteps for the diffusion)"
         self.t_star = args.t_star
-        bs = args.batch_size
-        bs_star = args.batch_size_star
         self.num_steps_for_each_t = args.t_star_arg
         self.num_steps_at_curr_t = 0
         self.curr_t = args.t_star - 1
         
         t_star_frac = (self.T - self.t_star) / self.t_star
         self.probability_of_t_star_batch = 1 / (1 + 1 * t_star_frac)
-        self.other_count = 0
         self.method = args.t_star_method
 
     def weights(self):
@@ -248,11 +254,7 @@ class CurriculumTStarSampler(ScheduleSampler):
                  - weights: a tensor of weights to scale the resulting losses.
         """
         if np.random.random() > self.probability_of_t_star_batch:
-            w = th.ones([self.T - self.t_star], device=device)
-            p = w / th.sum(w)
-            indices = th.multinomial(p, batch_size, replacement=True).long()
-            weights = 1 / (len(p) * p[indices]).float()
-            self.other_count += 1
+            indices, weights = sample_above_t_star(self, batch_size, device)
         else:
             if self.num_steps_at_curr_t >= self.num_steps_for_each_t:
                 self.num_steps_at_curr_t = 0
@@ -260,3 +262,41 @@ class CurriculumTStarSampler(ScheduleSampler):
             indices, weights = sample_all_steps(self, batch_size, device, target=self.curr_t)
             self.num_steps_at_curr_t += 1
         return indices, weights
+
+if __name__=="__main__":
+    import sys
+    class Dummy:
+        def __init__(self):
+            self.t_star_method = sys.argv[1]
+            self.t_star_arg = 3
+            self.t_star = 13
+            self.num_timesteps = 50
+    diffusion = Dummy()
+    args = Dummy()
+    inst = create_named_schedule_sampler(sys.argv[2], diffusion, args)
+    bs = int(sys.argv[3])
+    
+    print(len(np.ones([diffusion.num_timesteps])))
+    def debug():
+        print()
+        i, w = inst.sample(bs, "cpu")
+        print(f"i.shape{i.shape}, max(i){th.max(i)}, min(i){th.min(i)}, w.shape{w.shape}")
+        if len(i.shape) < 2:
+            print(i)
+        else:
+            print(i[:4, :4])
+            t = i
+            ts_list = [t[:, i] for i in range(0, t.shape[1])]
+            if True:# and torch.rand(1).item() < 0.2:
+                print("len(ts_list)", len(ts_list))
+                print("ts_list[0]", ts_list[0])
+                print("ts_list[-1]", ts_list[-1])
+                print("th.max(ts_list)", th.max(th.cat(ts_list)))
+                print("th.min(ts_list)", th.min(th.cat(ts_list)))
+        print(w)
+    debug()
+    debug()
+    debug()
+    debug()
+    debug()
+    

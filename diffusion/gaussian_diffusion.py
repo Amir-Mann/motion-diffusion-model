@@ -129,6 +129,8 @@ class GaussianDiffusion:
         model_mean_type,
         model_var_type,
         loss_type,
+        t_star=0,
+        t_star_method=None,
         rescale_timesteps=False,
         uniform_corruption=0.,
         detach_after_iteration=False, # Only for iterative t values, where you train based on the model output
@@ -217,6 +219,8 @@ class GaussianDiffusion:
         self.kinematic_tree_sources = []
         self.kinematic_tree_dests = []
 
+        self.t_star=t_star
+        self.t_star_method=t_star_method
         self.uniform_corruption = uniform_corruption
         self.detach_after_iteration = detach_after_iteration
         self.use_only_last_loss = use_only_last_loss
@@ -232,7 +236,6 @@ class GaussianDiffusion:
             return loss, non_zero_elements
         mse_loss_val = loss / non_zero_elements
         return mse_loss_val
-
 
     def q_mean_variance(self, x_start, t):
         """
@@ -1249,7 +1252,7 @@ class GaussianDiffusion:
         output = th.where((t == 0), decoder_nll, kl)
         return {"output": output, "pred_xstart": out["pred_xstart"]}
 
-    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, dataset=None):
+    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, dataset=None, zero_grad=None):
         """
         Compute training losses for a single timestep.
 
@@ -1259,6 +1262,7 @@ class GaussianDiffusion:
         :param model_kwargs: if not None, a dict of extra keyword arguments to
             pass to the model. This can be used for conditioning.
         :param noise: if specified, the specific Gaussian noise to try to remove.
+        :param zero_grad: Function called for zeroing grad in recursive diffusion lost strategy
         :return: a dict with the key "loss" containing a tensor of shape [N].
                  Some mean or variance settings may also have other keys.
         """
@@ -1282,17 +1286,35 @@ class GaussianDiffusion:
             else:
                 corruption = self.uniform_corruption * th.rand_like(x_start) * 2 - self.uniform_corruption
             x_start += corruption
+        if self.t_star_method == "recursive" and (t < self.t_star).any():
+            enc.eval()
+            with th.no_grad():  
+                x_start = self.p_sample_loop(
+                    model=enc,
+                    shape=x_start.shape,
+                    init_image=x_start,
+                    clip_denoised=False,
+                    skip_timesteps=(self.num_timesteps - self.t_star),
+                    model_kwargs=model_kwargs
+                )
+                x_start = x_start.detach()
+            enc.train()
+            zero_grad()
         
         if len(t.shape) == 1:
             ts_list = [t]
         elif len(t.shape) == 2:
             ts_list = [t[:, i] for i in range(0, t.shape[1])]
-            if False: #torch.rand(1).item() < 0.01:
-                print("len(ts_list)", len(ts_list))
-                print("ts_list[0]", ts_list[0])
-                print("ts_list[-1]", ts_list[-1])
-                print("self.use_only_last_loss", self.use_only_last_loss)
-                print("self.detach_after_iteration", self.detach_after_iteration)
+        if False and torch.rand(1).item() < 0.2:
+            print("len(ts_list)", len(ts_list))
+            print("ts_list[0]", ts_list[0])
+            print("ts_list[-1]", ts_list[-1])
+            print("torch.max(ts_list)", torch.max(torch.cat(ts_list)))
+            print("torch.min(ts_list)", torch.min(torch.cat(ts_list)))
+            print("self.use_only_last_loss", self.use_only_last_loss)
+            print("self.detach_after_iteration", self.detach_after_iteration)
+            if True and torch.rand(1).item() < 0.1:
+                exit()
         terms = {}
 
         for i, t in enumerate(ts_list):
@@ -1445,7 +1467,6 @@ class GaussianDiffusion:
                                 "t": t.cpu(),
                             }, f)
                         exit()
-
                 else:
                     terms[str(i) + "_rot_mse"] = self.masked_l2(target, model_output, mask) # mean_flat(rot_mse)
 
