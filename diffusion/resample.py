@@ -19,7 +19,9 @@ def create_named_schedule_sampler(name, diffusion, args):
     elif name == "t_star":
         if args.t_star_method == "curriculum":
             return CurriculumTStarSampler(diffusion, args)
-        elif args.t_star_method == "recursive":
+        elif "recursive" in args.t_star_method:
+            if "uniform_recursive" in args.t_star_method:
+                return UniformSampler(diffusion)
             args.t_star_arg = 1
             return TStarUniformSampler(diffusion, args, buckets=True)
         return TStarUniformSampler(diffusion, args, buckets="_b1" in args.t_star_method)

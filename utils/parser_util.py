@@ -74,7 +74,9 @@ def add_diffusion_options(parser):
     group.add_argument("--sample_2d", action='store_true',
                        help="Train based on 2d projection of the data instead of the original formulation.")
     iterative_tstar_methods = [f'iterative_b{b}_e{e}_d{d}' for b in [0, 1] for e in [0, 1] for d in[0, 1]]
-    group.add_argument("--t_star_method", default='None', choices=['None', 'curriculum', 'recursive'] + iterative_tstar_methods, type=str,
+    recursive_methods = [f'uniform_recursive_{p}' for p in [0.1, 0.25, 0.5, 0.75, 0.9]]
+    tstar_methods = ['None', 'curriculum', 'recursive', 'uniform_recursive'] + iterative_tstar_methods + recursive_methods
+    group.add_argument("--t_star_method", default='None', choices=tstar_methods, type=str,
                        help="For training using a special method for the last t_star steps. Must be None or used with a valid value of t_star")
     group.add_argument("--t_star", default=None, type=int,
                        help="t_star, the value of minimal value to use regular training for, from values lower then t* will use a method using the t_star_method.")

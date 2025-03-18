@@ -221,9 +221,14 @@ class GaussianDiffusion:
 
         self.t_star=t_star
         self.t_star_method=t_star_method
+        if self.t_star_method[:len("uniform_recursive_")] == "uniform_recursive_":
+            self.t_star_recursive_probabilty = float(self.t_star_method[len("uniform_recursive_"):])
+        else:
+            self.t_star_recursive_probabilty = 1
         self.uniform_corruption = uniform_corruption
         self.detach_after_iteration = detach_after_iteration
         self.use_only_last_loss = use_only_last_loss
+        self.counter = 0
 
     def masked_l2(self, a, b, mask, scaled=True):
         # assuming a.shape == b.shape == bs, J, Jdim, seqlen
@@ -1286,18 +1291,25 @@ class GaussianDiffusion:
             else:
                 corruption = self.uniform_corruption * th.rand_like(x_start) * 2 - self.uniform_corruption
             x_start += corruption
-        if self.t_star_method == "recursive" and (t < self.t_star).any():
+        if "recursive" in self.t_star_method and (t < self.t_star).any():
             enc.eval()
-            with th.no_grad():  
-                x_start = self.p_sample_loop(
+            with th.no_grad():
+                mask_recursive = (t < self.t_star) & (th.rand_like(t, dtype=th.float) < self.t_star_recursive_probabilty)
+                if self.counter < 10:
+                    print("mask_recursive", mask_recursive.sum() / len(mask_recursive))
+                    self.counter += 1
+
+                denoised_x_start = self.p_sample_loop(
                     model=enc,
                     shape=x_start.shape,
                     init_image=x_start,
                     clip_denoised=False,
                     skip_timesteps=(self.num_timesteps - self.t_star),
                     model_kwargs=model_kwargs
-                )
-                x_start = x_start.detach()
+                ).detach()
+                
+                x_start[mask_recursive] = denoised_x_start[mask_recursive]
+
             enc.train()
             zero_grad()
         
