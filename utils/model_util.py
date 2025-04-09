@@ -96,7 +96,8 @@ def create_gaussian_diffusion(args):
         lambda_cam_complement=args.lambda_cam_complement,
         t_star=args.t_star,
         t_star_method=args.t_star_method,
-        uniform_corruption=args.corrupt_teacher,
+        corruption_method=args.corrupt_teacher_method,
+        corruption_scale=args.corrupt_teacher_scale,
         detach_after_iteration=detach_after_iteration,
         use_only_last_loss=use_only_last_loss
     )

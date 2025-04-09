@@ -132,7 +132,8 @@ class GaussianDiffusion:
         t_star=0,
         t_star_method=None,
         rescale_timesteps=False,
-        uniform_corruption=0.,
+        corruption_method="None",
+        corruption_scale=0.,
         detach_after_iteration=False, # Only for iterative t values, where you train based on the model output
         use_only_last_loss=False,
         lambda_rcxyz=0.,
@@ -225,7 +226,8 @@ class GaussianDiffusion:
             self.t_star_recursive_probabilty = float(self.t_star_method[len("uniform_recursive_"):])
         else:
             self.t_star_recursive_probabilty = 1
-        self.uniform_corruption = uniform_corruption
+        self.corruption_method = corruption_method
+        self.corruption_scale = corruption_scale
         self.detach_after_iteration = detach_after_iteration
         self.use_only_last_loss = use_only_last_loss
         self.counter = 0
@@ -1285,19 +1287,20 @@ class GaussianDiffusion:
             model_kwargs = {}
         if noise is None:
             noise = th.randn_like(x_start)
-        if self.uniform_corruption:
-            if self.uniform_corruption < 0:
-                corruption = ( - self.uniform_corruption) * th.rand_like(x_start)# * 2 - self.uniform_corruption
+        if self.corruption_method != "None":
+            if self.corruption_method == "uniform_positive":
+                corruption = self.corruption_scale * th.rand_like(x_start)
+            elif self.corruption_method == "uniform_balanced":
+                corruption = self.corruption_scale * th.rand_like(x_start) * 2 - self.corruption_scale
+            elif self.corruption_method == "fixed_positive":
+                corruption = self.corruption_scale * th.ones_like(x_start)
             else:
-                corruption = self.uniform_corruption * th.rand_like(x_start) * 2 - self.uniform_corruption
+                raise RuntimeError("Unkown corruption method.")
             x_start += corruption
         if "recursive" in self.t_star_method and (t < self.t_star).any():
             enc.eval()
             with th.no_grad():
-                mask_recursive = (t < self.t_star) & (th.rand_like(t, dtype=th.float) < self.t_star_recursive_probabilty)
-                if self.counter < 10:
-                    print("mask_recursive", mask_recursive.sum() / len(mask_recursive))
-                    self.counter += 1
+                mask_recursive = (t.view(-1) < self.t_star) & (th.rand(t.shape[0], device=t.device) < self.t_star_recursive_probabilty)
 
                 denoised_x_start = self.p_sample_loop(
                     model=enc,
